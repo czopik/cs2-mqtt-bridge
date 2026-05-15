@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import logging
+import os
+import re
 import time
 
 
@@ -31,10 +33,29 @@ class HudState:
     name: str = ""
 
 
+def _env_int(name: str, fallback: int) -> int:
+    try:
+        return int(os.getenv(name, str(fallback)))
+    except (TypeError, ValueError):
+        return fallback
+
+
 class HudRenderer:
-    width = 12
+    """Static 8px-high LED matrix renderer.
+
+    Your display is tiny: 6 x 8x8 modules = 8x48 px. With a common 5x7
+    font and one spacing column that is about 8 readable characters.
+    Keep panels short, left-aligned and ASCII-only.
+    """
 
     def __init__(self) -> None:
+        modules = max(1, _env_int("HUD_MATRIX_MODULES", 6))
+        font_columns = max(4, _env_int("HUD_FONT_COLUMNS", 5))
+        char_spacing = max(0, _env_int("HUD_CHAR_SPACING", 1))
+        explicit_width = _env_int("HUD_WIDTH_CHARS", 0)
+        calculated_width = max(4, (modules * 8) // (font_columns + char_spacing))
+        self.width = explicit_width or calculated_width
+
         self._boom_started_at = 0.0
         self._boom_until = 0.0
         self._defuse_until = 0.0
@@ -72,26 +93,26 @@ class HudRenderer:
         if mode == "boom":
             return self._render_boom(now)
         if mode == "defused":
-            return self.drawStaticText("[ DEFUSE ]")
+            return self.drawStaticText("DEFUSE")
         if mode == "bomb":
             return self._render_bomb(state, now)
         if mode == "dead":
             deaths = self._n(state.deaths, 0)
-            return self.drawSplitStaticText("DEAD", f"{deaths:02d}")
+            return self.drawStaticText(f"DEAD {deaths:02d}")
         if mode == "kill":
-            return self.drawStaticText(self._kill_popup_text or "KILL", align="left")
+            return self.drawStaticText(self._kill_popup_text or "KILL")
         if mode == "mvp":
-            return self.drawStaticText("* MVP! *")
+            return self.drawStaticText("MVP")
         if mode == "mvp_name":
-            return self.drawStaticText(self._mvp_name or "* MVP! *")
+            return self.drawStaticText(self._mvp_name or "MVP")
         if mode == "win":
-            return self.drawStaticText("* WIN *")
+            return self.drawStaticText("WIN")
         if mode == "lose":
-            return self.drawStaticText("X LOSE X")
+            return self.drawStaticText("LOSE")
         if mode == "freeze":
             return self._render_freeze(state, now)
         if mode == "ready":
-            return self.drawStaticText("READY")
+            return self.drawStaticText("CS2 RDY")
         if mode == "clear":
             return self.drawStaticText("")
         return self._render_normal(state, now)
@@ -101,7 +122,6 @@ class HudRenderer:
         round_phase = (state.round_phase or "").lower()
         activity = (state.activity or "").lower()
         health = state.health
-
         locked = self._locked_round_result
 
         if bomb_state in {"exploded", "explode"}:
@@ -124,9 +144,6 @@ class HudRenderer:
         if health == 0:
             return "dead"
 
-        if now < self._kill_popup_until and self._kill_popup_text:
-            return "kill"
-
         if locked in {"win", "lose"}:
             if now < self._result_until:
                 if locked == "win" and self._is_mvp:
@@ -135,6 +152,9 @@ class HudRenderer:
             if locked == "win" and self._is_mvp and self._mvp_name and now < self._mvp_name_until:
                 return "mvp_name"
             return locked
+
+        if now < self._kill_popup_until and self._kill_popup_text:
+            return "kill"
 
         if round_phase in {"freezetime", "freeze", "warmup"} or state.countdown_seconds is not None:
             return "freeze"
@@ -156,30 +176,28 @@ class HudRenderer:
 
         if bomb_state in {"exploded", "explode"} and self._last_bomb_state != bomb_state:
             self._boom_started_at = now
-            self._boom_until = now + 2.5
+            self._boom_until = now + 3.0
 
         if bomb_state in {"defused", "defuse"} and self._last_bomb_state != bomb_state:
-            self._defuse_until = now + 2.0
+            self._defuse_until = now + 3.0
 
         if self._last_kills is not None and current_kills is not None and current_kills > self._last_kills:
-            self._kill_popup_text = f"Kills: {current_kills}"
-            self._kill_popup_until = now + 1.0
+            self._kill_popup_text = f"K+{current_kills:02d}"
+            self._kill_popup_until = now + 0.8
 
         round_result = self._resolve_round_result(state)
         if round_result in {"win", "lose"} and not self._locked_round_result:
-            # Start MVP window after any active kill flash so MVP shows a full 2s
-            mvp_start = max(self._kill_popup_until, now)
-            self._result_until = mvp_start + 2.0
-            self._locked_round_result = round_result  # lock first result, ignore later flickers
+            self._result_until = now + 2.0
+            self._locked_round_result = round_result
             if round_result == "win" and (state.round_kills or 0) > 0:
                 self._is_mvp = True
-                self._mvp_name = (state.name or "")[:self.width]
-                self._mvp_name_until = self._result_until + 2.0
+                self._mvp_name = self._clean_text(state.name or "")[: self.width]
+                self._mvp_name_until = self._result_until + 1.5
         if not round_result:
             self._is_mvp = False
             self._mvp_name = ""
             self._mvp_name_until = 0.0
-            self._locked_round_result = ""  # clear when phase leaves "over"
+            self._locked_round_result = ""
         self._last_round_result = round_result
 
         if current_kills is not None:
@@ -209,26 +227,38 @@ class HudRenderer:
     def _render_normal(self, state: HudState, now: float) -> str:
         health = self._n(state.health, 0)
         armor = self._n(state.armor, 0)
+        ammo = self._n(state.ammo, 0)
+        kills = self._n(state.kills, 0)
+        score_str = self._score_str(state)
 
-        full_text = f"H{health} A{armor}"
-        return self.drawStaticText(full_text, align="left")
+        if 0 < health <= 20:
+            if int(now / 0.4) % 2 == 0:
+                return self.drawStaticText("LOW HP")
+            return self.drawStaticText(f"HP{health:02d}")
+
+        page_count = 3 if score_str else 2
+        page = int(now / 2.0) % page_count
+        if page == 0:
+            return self.drawStaticText(f"HP{health:02d} K{kills:02d}")
+        if page == 1:
+            return self.drawStaticText(f"A{armor:02d} AM{ammo:02d}")
+        return self.drawStaticText(score_str)
 
     def _render_freeze(self, state: HudState, now: float) -> str:
         countdown = state.countdown_seconds
         round_number = state.round_number
         score_str = self._score_str(state)
 
-        # Countdown available → always show it
         if countdown is not None:
-            return self.drawStaticText(f"{countdown:02d}s", align="left")
+            label = "WARM" if (state.countdown_phase or "").lower() == "warmup" else "BUY"
+            return self.drawStaticText(f"{label} {countdown:02d}")
 
-        # No countdown → alternate RUNDA with score every 2s
         if round_number is not None:
-            if score_str and int(now) % 4 >= 2:
+            if score_str and int(now / 2.0) % 2 == 1:
                 return self.drawStaticText(score_str)
-            return self.drawStaticText(f"RUNDA {round_number:02d}", align="left")
+            return self.drawStaticText(f"R{round_number:02d}")
 
-        return self.drawStaticText("FREEZE", align="left")
+        return self.drawStaticText("FREEZE")
 
     def _score_str(self, state: HudState) -> str:
         ct = state.ct_score
@@ -237,51 +267,56 @@ class HudRenderer:
             return ""
         team = (state.team or "").upper()
         if team == "CT":
-            return f"{ct} - {t}"
+            return f"{ct}-{t}"
         if team == "T":
-            return f"{t} - {ct}"
-        return f"{ct} - {t}"
+            return f"{t}-{ct}"
+        return f"{ct}-{t}"
 
     def _render_bomb(self, state: HudState, now: float) -> str:
         secs = self._n(state.bomb_seconds, 0)
-        text = self.drawStaticText(f"BOMB {secs:02d}s", align="left")
-        if state.bomb_seconds is not None and state.bomb_seconds <= 10:
-            return text if int(now / 0.25) % 2 == 0 else self.drawStaticText("", align="left")
+        text = self.drawStaticText(f"BOMB {secs:02d}")
+        if secs <= 10:
+            return text if int(now / 0.25) % 2 == 0 else self.drawStaticText("")
         return text
 
     def _render_boom(self, now: float) -> str:
         elapsed = max(0.0, now - self._boom_started_at)
-        frames = (
-            '    BOOM    ',
-            '   B OO M   ',
-            '  B  OO  M  ',
-            ' B   O    M ',
-            'B          M',
-        )
-        if elapsed < 1.6:
-            index = min(len(frames) - 1, int(elapsed / 0.32))
-            return frames[index]
-        if elapsed >= 2.5:
-            return self.drawStaticText("")
-        # blink phase: all LEDs on/off at ~4Hz
-        if int(elapsed / 0.12) % 2 == 0:
-            return '############'
-        return self.drawStaticText("")
+        if elapsed < 2.2:
+            return self.drawStaticText("BOOM") if int(elapsed / 0.18) % 2 == 0 else self.drawStaticText("")
+        return self.drawStaticText("T WIN")
+
+    def _n(self, value: int | None, fallback: int) -> int:
+        if value is None:
+            return fallback
+        return max(0, min(999, value))
 
     @staticmethod
-    def _n(value: int | None, fallback: int) -> int:
-        return fallback if value is None else value
+    def _clean_text(text: str) -> str:
+        text = (text or "").upper()
+        replacements = str.maketrans(
+            {
+                "Ą": "A",
+                "Ć": "C",
+                "Ę": "E",
+                "Ł": "L",
+                "Ń": "N",
+                "Ó": "O",
+                "Ś": "S",
+                "Ź": "Z",
+                "Ż": "Z",
+            }
+        )
+        text = text.translate(replacements)
+        text = re.sub(r"[^A-Z0-9 +\-]", " ", text)
+        return re.sub(r"\s+", " ", text).strip()
 
-    def drawStaticText(self, text: str, align: str = "center") -> str:
-        clipped = (text or "")[: self.width]
-        if align == "left":
-            return clipped.ljust(self.width)
+    def drawStaticText(self, text: str, align: str = "left") -> str:
+        cleaned = self._clean_text(text)
+        clipped = cleaned[: self.width]
         if align == "right":
             return clipped.rjust(self.width)
-        return clipped.center(self.width)
+        return clipped.ljust(self.width)
 
     def drawSplitStaticText(self, left: str, right: str) -> str:
-        left = (left or "")[: self.width]
-        right = (right or "")[: self.width]
         combined = f"{left} {right}".strip()
-        return combined[: self.width].center(self.width)
+        return self.drawStaticText(combined)
