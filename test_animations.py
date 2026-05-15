@@ -1,10 +1,10 @@
 """
-Test animacji LED Matrix 8x48 przez MQTT.
-Uruchamia wszystkie sekwencje animacji po kolei z opisem.
+Test LED Matrix 8x48 przez MQTT.
 
 Uzycie:
     .venv\\Scripts\\python.exe test_animations.py
-    .venv\\Scripts\\python.exe test_animations.py --only bomb_planted
+    .venv\\Scripts\\python.exe test_animations.py --only hud_normal
+    .venv\\Scripts\\python.exe test_animations.py --list
 """
 
 from __future__ import annotations
@@ -13,6 +13,7 @@ import argparse
 import os
 import sys
 import time
+from collections.abc import Callable
 
 from dotenv import load_dotenv
 import paho.mqtt.client as mqtt
@@ -24,6 +25,9 @@ MQTT_PORT = int(os.getenv("MQTT_PORT", "1883"))
 MQTT_USER = os.getenv("MQTT_USERNAME", "mqtt")
 MQTT_PASS = os.getenv("MQTT_PASSWORD", "mqtt")
 MQTT_TOPIC = os.getenv("MQTT_TOPIC_LED", "all")
+HUD_WIDTH = int(os.getenv("HUD_WIDTH_CHARS", "8") or "8")
+if HUD_WIDTH <= 0:
+    HUD_WIDTH = 8
 
 connected = False
 
@@ -45,7 +49,6 @@ if MQTT_USER:
 client.connect(MQTT_HOST, MQTT_PORT, keepalive=30)
 client.loop_start()
 
-# Czekaj na polaczenie
 for _ in range(50):
     if connected:
         break
@@ -55,9 +58,14 @@ else:
     sys.exit(1)
 
 
+def fit(msg: str) -> str:
+    return (msg or "")[:HUD_WIDTH].ljust(HUD_WIDTH)
+
+
 def pub(msg: str) -> None:
-    client.publish(MQTT_TOPIC, msg, qos=1)
-    label = repr(msg) if msg == "" else msg
+    payload = fit(msg)
+    client.publish(MQTT_TOPIC, payload, qos=1)
+    label = repr(payload) if payload.strip() == "" else payload
     print(f"  -> {label}")
 
 
@@ -73,237 +81,112 @@ def sep(title: str) -> None:
     print(f"{'='*55}")
 
 
+def blink(text: str, times: int = 4, on: float = 0.2, off: float = 0.15) -> None:
+    for _ in range(times):
+        pub(text)
+        pause(on)
+        pub("")
+        pause(off)
+
+
 # ---------------------------------------------------------------------------
-# Definicje testow
+# Compact HUD tests for 6 x 8x8 modules = 8x48 px
 # ---------------------------------------------------------------------------
 
-def test_bomb_planted():
-    sep("TEST: BOMBA PODLOZONA (alarm alert)")
-    pub("!! BOMBA !!")
-    pause(0.25, "blysk 1")
-    pub("")
-    pause(0.25)
-    pub("!! BOMBA !!")
-    pause(0.25, "blysk 2")
-    pub("")
-    pause(0.25)
-    pub("BOMBA PODLOZONA 40s")
-    pause(2.5, "stabilny stan")
+def test_hud_normal() -> None:
+    sep("HUD: normalne strony")
+    for msg in ("HP84 K18", "A91 AM23", "7-5"):
+        pub(msg)
+        pause(2.0)
     pub("")
 
 
-def test_bomb_timer_normal():
-    sep("TEST: TIMER NORMALNY (40s -> 11s, co 1s)")
-    for s in range(40, 10, -1):
-        pub(f"BOMBA {s}s")
-        pause(0.15)  # przyspieszone dla testu
+def test_hud_low_hp() -> None:
+    sep("HUD: LOW HP")
+    for _ in range(6):
+        pub("LOW HP")
+        pause(0.35)
+        pub("HP09")
+        pause(0.35)
     pub("")
 
 
-def test_bomb_timer_warning():
-    sep("TEST: TIMER OSTRZEZENIE (10s -> 5s, naprzemienne)")
-    for s in range(10, 4, -1):
-        bars = ">" * min(s, 5)
-        pub(f"!! UWAGA {s}s !!")
-        pause(0.3)
-        pub(f"{bars} {s}s {bars}")
-        pause(0.3)
+def test_hud_bomb() -> None:
+    sep("HUD: bomba 34s -> 0s")
+    for s in range(34, 10, -1):
+        pub(f"BOMB {s:02d}")
+        pause(0.1)
+    for s in range(10, -1, -1):
+        pub(f"BOMB {s:02d}")
+        pause(0.18)
+        pub("")
+        pause(0.12)
     pub("")
 
 
-def test_bomb_timer_critical():
-    sep("TEST: TIMER KRYTYCZNY (4s -> 0s, szybkie miganie)")
-    for s in range(4, -1, -1):
-        pub(f">>> {s}s <<<")
-        pause(0.15)
-        pub(f"*** {s}s ***")
-        pause(0.15)
-        pub(f">>> {s}s <<<")
-        pause(0.15)
-    pub("")
-
-
-def test_bomb_defused():
-    sep("TEST: BOMBA ROZBROJONA")
-    pub("")
-    pause(0.05)
-    pub("ROZBROJON!")
-    pause(0.4)
-    pub("** ROZBROJON **")
-    pause(0.6)
-    pub("CT WIN! :)")
-    pause(2.5)
-    pub("")
-
-
-def test_bomb_exploded():
-    sep("TEST: BOMBA WYBUCHLA")
-    pub("WYBUCH!!!")
-    pause(0.2)
-    pub("")
-    pause(0.1)
-    pub("WYBUCH!!!")
-    pause(0.2)
-    pub("")
-    pause(0.1)
-    pub("WYBUCH!!!")
-    pause(2.5)
-    pub("")
-
-
-def test_round_freezetime():
-    sep("TEST: FAZA FREEZE")
-    pub("-- FREEZE --")
-    pause(2.0)
-    pub("")
-
-
-def test_round_live():
-    sep("TEST: RUNDA LIVE")
-    pub(">>> LIVE <<<")
-    pause(2.0)
-    pub("")
-
-
-def test_round_over():
-    sep("TEST: RUNDA ZAKONCZONA")
-    pub("RUNDA OVER")
-    pause(2.0)
-    pub("")
-
-
-def test_bomb_carried():
-    sep("TEST: BOMBA WZIĘTA")
-    pub("BOMBA WZIĘTA")
-    pause(2.0)
-    pub("")
-
-
-def test_bomb_dropped():
-    sep("TEST: BOMBA UPUSZCZONA")
-    pub("BOMBA UPUSZCZON")
-    pause(2.0)
-    pub("")
-
-
-def test_player_killed():
-    sep("TEST: KILL (liczba zabójstw)")
-    pub(">>> KILL <<<")
-    pause(0.3)
-    pub("*** 1 ***")
-    pause(2.0)
-    pub("KILL: 1")
-    pause(0.5)
-    pub("")
+def test_hud_freeze() -> None:
+    sep("HUD: buy/freezetime")
+    for s in range(15, 0, -1):
+        pub(f"BUY {s:02d}")
+        pause(0.12)
+    pub("LIVE")
     pause(1.0)
-    # Symuluj drugi kill
-    pub(">>> KILL <<<")
-    pause(0.3)
-    pub("*** 2 ***")
-    pause(2.0)
-    pub("KILL: 2")
-    pause(0.5)
     pub("")
 
 
-def test_full_round_simulation():
-    sep("TEST: PELNA SYMULACJA RUNDY")
-
-    print("\n[FAZA 1] Freeze time")
-    pub("-- FREEZE --")
-    pause(1.5)
-    pub("")
-    pause(0.5)
-
-    print("\n[FAZA 2] Runda live")
-    pub(">>> LIVE <<<")
-    pause(1.5)
-    pub("")
+def test_hud_events() -> None:
+    sep("HUD: eventy")
+    for msg in ("K+18", "DEAD 12", "DEFUSE", "WIN", "LOSE"):
+        pub(msg)
+        pause(1.0)
+    blink("BOOM", times=6, on=0.15, off=0.1)
+    pub("T WIN")
     pause(1.0)
+    pub("")
 
-    print("\n[FAZA 3] Bomba podlozona (40s)")
-    pub("!! BOMBA !!")
-    pause(0.25)
-    pub("")
-    pause(0.25)
-    pub("!! BOMBA !!")
-    pause(0.25)
-    pub("")
-    pause(0.25)
-    pub("BOMBA PODLOZONA 40s")
+
+def test_full_round_simulation() -> None:
+    sep("HUD: pelna symulacja rundy")
+    for s in range(5, 0, -1):
+        pub(f"BUY {s:02d}")
+        pause(0.35)
+    pub("LIVE")
     pause(0.8)
-
-    print("\n[FAZA 4] Odliczanie 40s..11s (przyspieszone)")
-    for s in range(40, 10, -1):
-        pub(f"BOMBA {s}s")
-        pause(0.08)
-
-    print("\n[FAZA 5] Odliczanie ostrzezenie 10s..5s")
-    for s in range(10, 4, -1):
-        bars = ">" * min(s, 5)
-        pub(f"!! UWAGA {s}s !!")
-        pause(0.25)
-        pub(f"{bars} {s}s {bars}")
-        pause(0.25)
-
-    print("\n[FAZA 6] Odliczanie krytyczne 4s..0s")
-    for s in range(4, -1, -1):
-        pub(f">>> {s}s <<<")
-        pause(0.12)
-        pub(f"*** {s}s ***")
-        pause(0.12)
-        pub(f">>> {s}s <<<")
-        pause(0.12)
-
-    print("\n[FAZA 7] Wybuch!")
-    pub("WYBUCH!!!")
-    pause(0.2)
-    pub("")
-    pause(0.1)
-    pub("WYBUCH!!!")
-    pause(0.2)
-    pub("")
-    pause(0.1)
-    pub("WYBUCH!!!")
-    pause(2.0)
-    pub("")
-    pause(0.5)
-
-    print("\n[ALTERNATYWA 7b] Rozbrojenie")
-    pub("")
-    pause(0.05)
-    pub("ROZBROJON!")
-    pause(0.4)
-    pub("** ROZBROJON **")
-    pause(0.6)
-    pub("CT WIN! :)")
-    pause(2.0)
+    pub("HP100K00")
+    pause(1.0)
+    pub("HP84 K01")
+    pause(1.0)
+    pub("A91 AM23")
+    pause(1.0)
+    pub("7-5")
+    pause(1.0)
+    for s in range(12, -1, -1):
+        if s <= 10:
+            pub(f"BOMB {s:02d}")
+            pause(0.18)
+            pub("")
+            pause(0.12)
+        else:
+            pub(f"BOMB {s:02d}")
+            pause(0.35)
+    blink("BOOM", times=5, on=0.15, off=0.1)
+    pub("T WIN")
+    pause(1.5)
     pub("")
 
 
-# ---------------------------------------------------------------------------
-# Rejestr testow
-# ---------------------------------------------------------------------------
-
-ALL_TESTS: dict[str, tuple[str, object]] = {
-    "bomb_planted":       ("Bomba podlozona - alert",                test_bomb_planted),
-    "bomb_timer_normal":  ("Timer normalny 40->11s",                 test_bomb_timer_normal),
-    "bomb_timer_warning": ("Timer ostrzezenie 10->5s",              test_bomb_timer_warning),
-    "bomb_timer_critical":("Timer krytyczny 4->0s",                 test_bomb_timer_critical),
-    "bomb_defused":       ("Bomba rozbrojona",                      test_bomb_defused),
-    "bomb_exploded":      ("Bomba wybuchla",                        test_bomb_exploded),
-    "round_freezetime":   ("Faza freeze",                           test_round_freezetime),
-    "round_live":         ("Runda live",                            test_round_live),
-    "round_over":         ("Runda zakonczona",                      test_round_over),
-    "bomb_carried":       ("Bomba wzięta",                          test_bomb_carried),
-    "bomb_dropped":       ("Bomba upuszczona",                      test_bomb_dropped),
-    "player_killed":      ("Kill (liczba zabójstw)",               test_player_killed),
-    "full_simulation":    ("Pelna symulacja rundy (wbudowana)",     test_full_round_simulation),
+ALL_TESTS: dict[str, tuple[str, Callable[[], None]]] = {
+    "hud_normal": ("Normalne strony: HP/kille, armor/ammo, wynik", test_hud_normal),
+    "hud_low_hp": ("Miganie LOW HP", test_hud_low_hp),
+    "hud_bomb": ("Timer bomby", test_hud_bomb),
+    "hud_freeze": ("Buy/freezetime", test_hud_freeze),
+    "hud_events": ("Kille, death, defuse, win/lose, boom", test_hud_events),
+    "full_simulation": ("Pelna symulacja rundy", test_full_round_simulation),
 }
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Test animacji LED Matrix 8x48")
+    parser = argparse.ArgumentParser(description="Test LED Matrix 8x48")
     parser.add_argument(
         "--only",
         metavar="TEST",
@@ -319,7 +202,7 @@ if __name__ == "__main__":
     if args.list:
         print("Dostepne testy:")
         for key, (desc, _) in ALL_TESTS.items():
-            print(f"  {key:<25} {desc}")
+            print(f"  {key:<20} {desc}")
         sys.exit(0)
 
     if args.only:
@@ -331,12 +214,12 @@ if __name__ == "__main__":
         print(f"\nUruchamiam: {desc}")
         fn()
     else:
-        print("\nUruchamiam WSZYSTKIE testy animacji...")
+        print("\nUruchamiam wszystkie testy HUD 8x48...")
         for key, (desc, fn) in ALL_TESTS.items():
             print(f"\n>>> {desc}")
             fn()
-            pause(1.0, "przerwa miedzy testami")
+            pause(0.8, "przerwa miedzy testami")
 
     pub("")
-    print("\n[KONIEC] Wszystkie testy zakonczone. Ekran wyczyszczony.")
+    print("\n[KONIEC] Test zakonczony. Ekran wyczyszczony.")
     client.loop_stop()
