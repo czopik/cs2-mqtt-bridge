@@ -6,7 +6,6 @@ import os
 import re
 import time
 
-
 logger = logging.getLogger("cs2_mqtt_hud")
 
 
@@ -23,7 +22,12 @@ class HudState:
     team: str = ""
     health: int | None = None
     armor: int | None = None
+    weapon: str = ""
+    weapon_raw: str = ""
+    weapon_type: str = ""
     ammo: int | None = None
+    ammo_reserve: int | None = None
+    ammo_clip_max: int | None = None
     kills: int | None = None
     deaths: int | None = None
     score: int | None = None
@@ -43,9 +47,8 @@ def _env_int(name: str, fallback: int) -> int:
 class HudRenderer:
     """Static 8px-high LED matrix renderer.
 
-    Your display is tiny: 6 x 8x8 modules = 8x48 px. With a common 5x7
-    font and one spacing column that is about 8 readable characters.
-    Keep panels short, left-aligned and ASCII-only.
+    6 x 8x8 modules = 8x48 px. With a 5x7 font and one spacing column this
+    gives about 8 readable characters. Keep panels short and ASCII-only.
     """
 
     def __init__(self) -> None:
@@ -77,10 +80,12 @@ class HudRenderer:
         mode = self._resolve_mode(state, now)
         if mode != self._last_mode:
             logger.debug(
-                "HUD mode=%s hp=%s ammo=%s kills=%s deaths=%s round_phase=%s bomb_state=%s bomb_seconds=%s round_result=%s",
+                "HUD mode=%s hp=%s weapon=%s ammo=%s/%s kills=%s deaths=%s round_phase=%s bomb_state=%s bomb_seconds=%s round_result=%s",
                 mode,
                 state.health,
+                state.weapon or "-",
                 state.ammo,
+                state.ammo_reserve,
                 state.kills,
                 state.deaths,
                 state.round_phase or "-",
@@ -241,8 +246,17 @@ class HudRenderer:
         if page == 0:
             return self.drawStaticText(f"HP{health:02d} K{kills:02d}")
         if page == 1:
-            return self.drawStaticText(f"A{armor:02d} AM{ammo:02d}")
+            return self._render_weapon_page(state, armor, ammo)
         return self.drawStaticText(score_str)
+
+    def _render_weapon_page(self, state: HudState, armor: int, ammo: int) -> str:
+        weapon = self._clean_text(state.weapon or "")[:4]
+        reserve = state.ammo_reserve
+        if weapon and ammo >= 0:
+            if reserve is not None and self.width >= 8:
+                return self.drawStaticText(f"{weapon}{ammo:02d}/{self._n(reserve, 999):02d}")
+            return self.drawStaticText(f"{weapon} {ammo:02d}")
+        return self.drawStaticText(f"A{armor:02d} AM{ammo:02d}")
 
     def _render_freeze(self, state: HudState, now: float) -> str:
         countdown = state.countdown_seconds
@@ -307,7 +321,7 @@ class HudRenderer:
             }
         )
         text = text.translate(replacements)
-        text = re.sub(r"[^A-Z0-9 +\-]", " ", text)
+        text = re.sub(r"[^A-Z0-9 +\-/]", " ", text)
         return re.sub(r"\s+", " ", text).strip()
 
     def drawStaticText(self, text: str, align: str = "left") -> str:
