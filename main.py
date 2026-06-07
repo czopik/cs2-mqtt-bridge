@@ -13,6 +13,7 @@ from flask import Flask, jsonify, request
 import paho.mqtt.client as mqtt
 
 from animations import AnimationEngine
+from events import EventDetector
 
 
 load_dotenv()
@@ -33,11 +34,17 @@ class Config:
 
     MQTT_TOPIC_RAW = os.getenv("MQTT_TOPIC_RAW", "cs2/raw")
     MQTT_TOPIC_STATE = os.getenv("MQTT_TOPIC_STATE", "cs2/state")
+    MQTT_TOPIC_EVENT = os.getenv("MQTT_TOPIC_EVENT", "cs2/event")
+    MQTT_TOPIC_STATUS = os.getenv("MQTT_TOPIC_STATUS", "cs2/status")
     MQTT_TOPIC_LED = os.getenv("MQTT_TOPIC_LED", "all")
     LED_MODE = os.getenv("LED_MODE", "hud").lower()
 
     PUBLISH_RAW = os.getenv("PUBLISH_RAW", "true").lower() == "true"
     PUBLISH_STATE = os.getenv("PUBLISH_STATE", "true").lower() == "true"
+    PUBLISH_EVENTS = os.getenv("PUBLISH_EVENTS", "true").lower() == "true"
+    PUBLISH_STATUS = os.getenv("PUBLISH_STATUS", "true").lower() == "true"
+    STATUS_OFFLINE_AFTER_SECONDS = int(os.getenv("STATUS_OFFLINE_AFTER_SECONDS", "45"))
+
     LED_CLEAR_BEFORE = os.getenv("LED_CLEAR_BEFORE", "true").lower() == "true"
     LED_CLEAR_AFTER = os.getenv("LED_CLEAR_AFTER", "true").lower() == "true"
     LED_HOLD_SECONDS = int(os.getenv("LED_HOLD_SECONDS", "8"))
@@ -54,7 +61,6 @@ logging.basicConfig(
 )
 logger = logging.getLogger("cs2_mqtt_bridge")
 
-
 app = Flask(__name__)
 
 
@@ -68,10 +74,13 @@ class BridgeState:
         self.last_kills = -1
         self.mqtt_connected = False
         self.bomb_planted_at: int | None = None
+        self.last_gsi_seen_monotonic = 0.0
+        self.last_status = "offline"
+        self.last_status_payload = ""
 
 
 state = BridgeState()
-
+event_detector = EventDetector()
 
 mqtt_client = mqtt.Client(
     mqtt.CallbackAPIVersion.VERSION2,
@@ -88,6 +97,7 @@ def on_connect(client: mqtt.Client, userdata: Any, flags: Any, reason_code: Any,
     if reason_code == 0:
         state.mqtt_connected = True
         logger.info("Connected to MQTT %s:%s", config.MQTT_HOST, config.MQTT_PORT)
+        publish_status("bridge_online")
     else:
         state.mqtt_connected = False
         logger.error("MQTT connect failed. reason_code=%s", reason_code)
@@ -104,7 +114,6 @@ mqtt_client.on_connect = on_connect
 mqtt_client.on_disconnect = on_disconnect
 
 
-
 def _to_int_seconds(value: Any) -> int | None:
     if value is None:
         return None
@@ -113,6 +122,18 @@ def _to_int_seconds(value: Any) -> int | None:
     except (TypeError, ValueError):
         return None
 
+
+def _to_int(value: Any) -> int | None:
+    if value is None:
+        return None
+    try:
+        return int(float(value))
+    except (TypeError, ValueError):
+        return None
+
+
+def _clean_string(value: Any) -> str:
+    return str(value or "").strip()
 
 
 def _get_bomb_state(payload: dict[str, Any]) -> str:
@@ -132,7 +153,6 @@ def _get_bomb_state(payload: dict[str, Any]) -> str:
     return ""
 
 
-
 def _normalize_round_phase(payload: dict[str, Any]) -> str:
     round_block = payload.get("round", {})
     if isinstance(round_block, dict):
@@ -147,7 +167,6 @@ def _normalize_round_phase(payload: dict[str, Any]) -> str:
             return phase.strip().lower()
 
     return ""
-
 
 
 def _bomb_remaining_seconds(payload: dict[str, Any]) -> int | None:
@@ -283,69 +302,124 @@ def _get_player_score(payload: dict[str, Any]) -> int | None:
     return _to_int_seconds(_get_player_match_stats(payload).get("score"))
 
 
-def _extract_weapon_ammo(weapon: Any) -> int | None:
+def _short_weapon_name(name: str) -> str:
+    name = name.replace("weapon_", "")
+    aliases = {
+        "ak47": "AK",
+        "m4a1": "M4",
+        "m4a1_silencer": "M4S",
+        "usp_silencer": "USP",
+        "hkp2000": "P2K",
+        "deagle": "DEAG",
+        "galilar": "GALIL",
+        "aug": "AUG",
+        "sg556": "SG",
+        "famas": "FAMAS",
+        "awp": "AWP",
+        "ssg08": "SSG",
+        "glock": "GLOCK",
+        "p250": "P250",
+        "elite": "DUAL",
+        "fiveseven": "57",
+        "tec9": "TEC9",
+        "cz75a": "CZ",
+        "mac10": "MAC",
+        "mp9": "MP9",
+        "mp7": "MP7",
+        "mp5sd": "MP5",
+        "ump45": "UMP",
+        "p90": "P90",
+        "bizon": "BIZON",
+        "xm1014": "XM",
+        "mag7": "MAG7",
+        "nova": "NOVA",
+        "sawedoff": "SAW",
+        "negev": "NEGEV",
+        "m249": "M249",
+        "knife": "KNIFE",
+        "c4": "C4",
+        "hegrenade": "HE",
+        "flashbang": "FLASH",
+        "smokegrenade": "SMOKE",
+        "molotov": "MOLO",
+        "incgrenade": "FIRE",
+        "decoy": "DECOY",
+    }
+    return aliases.get(name.lower(), name.upper()[:8])
+
+
+def _extract_weapon_info(weapon: Any, fallback_key: str = "") -> dict[str, Any] | None:
     if not isinstance(weapon, dict):
         return None
 
-    for key in (
-        "ammo_clip",
-        "clip_ammo",
-        "ammo_in_clip",
-        "current_ammo",
-        "ammo",
-        "clip",
-        "magazine",
-        "bullets",
-    ):
-        value = weapon.get(key)
-        if value is not None:
-            result = _to_int_seconds(value)
-            if result is not None:
-                return result
+    raw_name = _clean_string(weapon.get("name") or fallback_key)
+    ammo_clip = None
+    for key in ("ammo_clip", "clip_ammo", "ammo_in_clip", "current_ammo", "ammo", "clip", "magazine", "bullets"):
+        ammo_clip = _to_int_seconds(weapon.get(key))
+        if ammo_clip is not None:
+            break
+
+    ammo_reserve = None
+    for key in ("ammo_reserve", "reserve_ammo", "ammo_clip_reserve"):
+        ammo_reserve = _to_int_seconds(weapon.get(key))
+        if ammo_reserve is not None:
+            break
+
+    ammo_clip_max = None
+    for key in ("ammo_clip_max", "clip_max", "max_clip"):
+        ammo_clip_max = _to_int_seconds(weapon.get(key))
+        if ammo_clip_max is not None:
+            break
+
+    weapon_type = _clean_string(weapon.get("type"))
+    weapon_state = _clean_string(weapon.get("state")).lower()
+    is_active = bool(weapon.get("active")) or weapon_state in {"active", "equipped", "selected"}
 
     nested = weapon.get("state")
     if isinstance(nested, dict):
-        result = _extract_weapon_ammo(nested)
-        if result is not None:
-            return result
+        nested_info = _extract_weapon_info(nested, fallback_key=raw_name)
+        if nested_info:
+            raw_name = raw_name or nested_info.get("weapon_raw", "")
+            ammo_clip = ammo_clip if ammo_clip is not None else nested_info.get("ammo")
+            ammo_reserve = ammo_reserve if ammo_reserve is not None else nested_info.get("ammo_reserve")
+            ammo_clip_max = ammo_clip_max if ammo_clip_max is not None else nested_info.get("ammo_clip_max")
+            weapon_type = weapon_type or nested_info.get("weapon_type", "")
 
-    return None
+    if not raw_name and ammo_clip is None:
+        return None
+
+    return {
+        "weapon_raw": raw_name,
+        "weapon": _short_weapon_name(raw_name) if raw_name else "",
+        "weapon_type": weapon_type,
+        "ammo": ammo_clip,
+        "ammo_reserve": ammo_reserve,
+        "ammo_clip_max": ammo_clip_max,
+        "active": is_active,
+    }
 
 
-def _extract_ammo_from_weapons_container(container: Any) -> int | None:
+def _extract_weapon_from_container(container: Any) -> dict[str, Any] | None:
     if not isinstance(container, dict) or not container:
         return None
 
-    fallback_ammo: int | None = None
-    for weapon_name, weapon in container.items():
-        if not isinstance(weapon, dict):
+    fallback: dict[str, Any] | None = None
+    for weapon_key, weapon in container.items():
+        info = _extract_weapon_info(weapon, fallback_key=str(weapon_key))
+        if not info:
             continue
-
-        ammo = _extract_weapon_ammo(weapon)
-        if ammo is None:
-            continue
-
-        weapon_state = str(weapon.get("state") or "").lower()
-        is_active = bool(weapon.get("active")) or weapon_state in {"active", "equipped", "selected"}
-        if is_active:
-            logger.debug("Found active weapon ammo via %s: %s", weapon_name, ammo)
-            return ammo
-
-        if fallback_ammo is None:
-            fallback_ammo = ammo
-
-    if fallback_ammo is not None:
-        logger.debug("Found fallback weapon ammo: %s", fallback_ammo)
-        return fallback_ammo
-
-    return None
+        if info.get("active"):
+            return info
+        if fallback is None:
+            fallback = info
+    return fallback
 
 
-def _get_player_ammo(payload: dict[str, Any]) -> int | None:
+def _get_active_weapon(payload: dict[str, Any]) -> dict[str, Any]:
     player = _get_player_block(payload)
     state_block = _get_player_state_block(payload)
 
-    direct_candidates = (
+    candidates = (
         player.get("active_weapon"),
         player.get("weapon"),
         player.get("weapons"),
@@ -354,28 +428,25 @@ def _get_player_ammo(payload: dict[str, Any]) -> int | None:
         payload.get("weapon"),
         payload.get("player_weapon"),
         payload.get("player_weapons"),
-        payload.get("allplayers_weapons"),
     )
-    for candidate in direct_candidates:
-        ammo = _extract_weapon_ammo(candidate)
-        if ammo is None:
-            ammo = _extract_ammo_from_weapons_container(candidate)
-        if ammo is not None:
-            logger.debug("Found ammo candidate: %s -> %s", candidate.get("name") if isinstance(candidate, dict) else "-", ammo)
-            return ammo
 
-    ammo = _extract_ammo_from_weapons_container(player.get("weapons"))
-    if ammo is not None:
-        return ammo
+    for candidate in candidates:
+        info = _extract_weapon_info(candidate)
+        if info is None:
+            info = _extract_weapon_from_container(candidate)
+        if info is not None:
+            return info
+
+    info = _extract_weapon_from_container(player.get("weapons"))
+    if info is not None:
+        return info
 
     for key in ("ammo", "ammo_clip", "clip_ammo", "current_ammo"):
         ammo = _to_int_seconds(state_block.get(key))
         if ammo is not None:
-            logger.debug("Found state ammo %s: %s", key, ammo)
-            return ammo
+            return {"weapon_raw": "", "weapon": "", "weapon_type": "", "ammo": ammo, "ammo_reserve": None, "ammo_clip_max": None, "active": True}
 
-    logger.debug("No ammo found in any source")
-    return None
+    return {"weapon_raw": "", "weapon": "", "weapon_type": "", "ammo": None, "ammo_reserve": None, "ammo_clip_max": None, "active": False}
 
 
 def _get_player_kills(payload: dict[str, Any]) -> int | None:
@@ -386,67 +457,48 @@ def _get_player_kills(payload: dict[str, Any]) -> int | None:
     if not isinstance(player, dict):
         player = {}
 
-    # Prefer total kills for the current match. This works in Deathmatch,
-    # where round_kills often stays at 0 even though match_stats.kills grows.
     player_match_stats_nested = player.get("match_stats", {})
     if isinstance(player_match_stats_nested, dict) and player_match_stats_nested:
         kills = player_match_stats_nested.get("kills")
         if kills is not None:
-            result = _to_int_seconds(kills)
-            logger.debug("Found player.match_stats.kills: %s -> %s", kills, result)
-            return result
+            return _to_int_seconds(kills)
 
     player_match_stats = payload.get("player_match_stats", {})
     if isinstance(player_match_stats, dict) and player_match_stats:
         kills = player_match_stats.get("kills")
         if kills is not None:
-            result = _to_int_seconds(kills)
-            logger.debug("Found player_match_stats.kills: %s -> %s", kills, result)
-            return result
+            return _to_int_seconds(kills)
 
-    # Try round_kills first (kills in current round), fallback to match_stats
     round_kills = player_state.get("round_kills")
     if round_kills is not None:
-        result = _to_int_seconds(round_kills)
-        logger.debug("Found round_kills: %s -> %s", round_kills, result)
-        return result
+        return _to_int_seconds(round_kills)
 
     player_inner_state = player.get("state", {})
     if isinstance(player_inner_state, dict):
         round_kills = player_inner_state.get("round_kills")
         if round_kills is not None:
-            result = _to_int_seconds(round_kills)
-            logger.debug("Found player.state.round_kills: %s -> %s", round_kills, result)
-            return result
+            return _to_int_seconds(round_kills)
 
     match_stats = player_state.get("match_stats", {})
     if isinstance(match_stats, dict) and match_stats:
         kills = match_stats.get("kills")
         if kills is not None:
-            result = _to_int_seconds(kills)
-            logger.debug("Found match_stats.kills: %s -> %s", kills, result)
-            return result
+            return _to_int_seconds(kills)
 
-    # Fallback: try to count kills from allplayers_state if player_state is empty
     all_players = payload.get("allplayers_state", {})
     if isinstance(all_players, dict) and all_players:
         provider = payload.get("provider", {})
-        player = payload.get("player", {})
-        player_id = provider.get("steamid") or (player.get("steamid") if isinstance(player, dict) else None)
+        player_id = provider.get("steamid") or player.get("steamid")
         if player_id and player_id in all_players:
             player_info = all_players[player_id]
             if isinstance(player_info, dict):
-                # Try different kill field names
                 for field in ("match_stats", "stats"):
                     stats = player_info.get(field, {})
                     if isinstance(stats, dict):
-                        kills = stats.get("kills", 0)
-                        if kills:
-                            result = _to_int_seconds(kills)
-                            logger.debug("Found allplayers kills via %s: %s -> %s", field, kills, result)
-                            return result
-    
-    logger.debug("No kills found in any source")
+                        kills = stats.get("kills")
+                        if kills is not None:
+                            return _to_int_seconds(kills)
+
     return None
 
 
@@ -460,14 +512,41 @@ def publish(topic: str, payload: str, qos: int = 1, retain: bool = False) -> Non
         logger.error("Publish failed topic=%s rc=%s", topic, info.rc)
 
 
+def publish_json(topic: str, payload: dict[str, Any], qos: int = 1, retain: bool = False) -> None:
+    publish(topic, json.dumps(payload, separators=(",", ":"), sort_keys=True), qos=qos, retain=retain)
+
+
+def publish_status(status: str, extra: dict[str, Any] | None = None) -> None:
+    if not config.PUBLISH_STATUS:
+        return
+    payload = {
+        "status": status,
+        "bridge": "online",
+        "last_gsi_seen_seconds_ago": _last_gsi_age_seconds(),
+        "timestamp": int(time.time()),
+    }
+    if extra:
+        payload.update(extra)
+
+    compact = json.dumps(payload, separators=(",", ":"), sort_keys=True)
+    if compact == state.last_status_payload:
+        return
+    publish(config.MQTT_TOPIC_STATUS, compact, retain=True)
+    state.last_status_payload = compact
+    state.last_status = status
+
+
+def _last_gsi_age_seconds() -> int | None:
+    if state.last_gsi_seen_monotonic <= 0:
+        return None
+    return max(0, int(time.monotonic() - state.last_gsi_seen_monotonic))
+
 
 def publish_led(message: str) -> None:
-    """Low-level publish to the LED matrix topic (called by AnimationEngine)."""
     msg = (message or "").replace("\n", " ").replace("\r", " ").strip()
     if len(msg) > 120:
         msg = msg[:120]
     publish(config.MQTT_TOPIC_LED, msg)
-
 
 
 anim = AnimationEngine(publish_led)
@@ -476,13 +555,13 @@ anim = AnimationEngine(publish_led)
 def build_state(payload: dict[str, Any]) -> dict[str, Any]:
     provider = payload.get("provider", {})
     map_block = payload.get("map", {})
-    round_block = payload.get("round", {})
 
     bomb_state = _get_bomb_state(payload)
     round_phase = _normalize_round_phase(payload)
     bomb_seconds = _bomb_remaining_seconds(payload)
     if bomb_state not in ("planted", "plant"):
         state.bomb_planted_at = None
+
     kills = _get_player_kills(payload)
     health = _get_player_health(payload)
     armor = _get_player_armor(payload)
@@ -490,21 +569,21 @@ def build_state(payload: dict[str, Any]) -> dict[str, Any]:
     team = _get_player_team(payload)
     deaths = _get_player_deaths(payload)
     score = _get_player_score(payload)
-    ammo = _get_player_ammo(payload)
+    weapon = _get_active_weapon(payload)
     round_kills = _get_player_round_kills(payload)
     round_number = _get_round_number(payload)
     round_win_team = _get_round_win_team(payload)
     countdown_seconds = _get_phase_countdown_seconds(payload)
     countdown_phase = _get_phase_countdown_phase(payload)
-    ct_score = int(map_block.get("team_ct", {}).get("score") or 0)
-    t_score = int(map_block.get("team_t", {}).get("score") or 0)
+    ct_score = int(map_block.get("team_ct", {}).get("score") or 0) if isinstance(map_block, dict) else 0
+    t_score = int(map_block.get("team_t", {}).get("score") or 0) if isinstance(map_block, dict) else 0
     name = _get_player_name(payload)
 
-    result = {
-        "timestamp": provider.get("timestamp"),
-        "map": map_block.get("name"),
-        "map_mode": map_block.get("mode"),
-        "map_phase": map_block.get("phase"),
+    return {
+        "timestamp": provider.get("timestamp") if isinstance(provider, dict) else None,
+        "map": map_block.get("name") if isinstance(map_block, dict) else None,
+        "map_mode": map_block.get("mode") if isinstance(map_block, dict) else None,
+        "map_phase": map_block.get("phase") if isinstance(map_block, dict) else None,
         "round_phase": round_phase,
         "round": round_number,
         "round_win_team": round_win_team,
@@ -516,7 +595,12 @@ def build_state(payload: dict[str, Any]) -> dict[str, Any]:
         "team": team,
         "health": health,
         "armor": armor,
-        "ammo": ammo,
+        "weapon": weapon.get("weapon") or "",
+        "weapon_raw": weapon.get("weapon_raw") or "",
+        "weapon_type": weapon.get("weapon_type") or "",
+        "ammo": weapon.get("ammo"),
+        "ammo_reserve": weapon.get("ammo_reserve"),
+        "ammo_clip_max": weapon.get("ammo_clip_max"),
         "kills": kills,
         "deaths": deaths,
         "score": score,
@@ -525,8 +609,6 @@ def build_state(payload: dict[str, Any]) -> dict[str, Any]:
         "t_score": t_score,
         "name": name,
     }
-    return result
-
 
 
 def handle_led_logic(cs2_state: dict[str, Any]) -> None:
@@ -535,16 +617,19 @@ def handle_led_logic(cs2_state: dict[str, Any]) -> None:
     bomb_seconds = cs2_state.get("bomb_seconds")
     kills = cs2_state.get("kills")
 
-    # Debug: log aktywne zdarzenia
     if bomb_state or round_phase or kills:
-        logger.debug("LED Event: bomb_state=%s, round_phase=%s, bomb_seconds=%s, kills=%s", 
-                     bomb_state or "-", round_phase or "-", bomb_seconds, kills)
+        logger.debug(
+            "LED Event: bomb_state=%s, round_phase=%s, bomb_seconds=%s, kills=%s",
+            bomb_state or "-",
+            round_phase or "-",
+            bomb_seconds,
+            kills,
+        )
 
-    # --- Zmiana stanu bomby ---
     if bomb_state != state.last_bomb_state:
         if bomb_state in ("planted", "plant"):
             anim.play_bomb_planted(bomb_seconds)
-            state.last_timer_second = -1  # wymus odswiezenie timera w kolejnym ticku
+            state.last_timer_second = -1
         elif bomb_state in ("defused", "defuse"):
             anim.play_bomb_defused()
             state.last_timer_second = -1
@@ -560,36 +645,27 @@ def handle_led_logic(cs2_state: dict[str, Any]) -> None:
 
         state.last_bomb_state = bomb_state
 
-    # --- Timer bomby (max 1 update/s) ---
     if bomb_state in ("planted", "plant") and bomb_seconds is not None:
         if bomb_seconds != state.last_timer_second:
             anim.play_bomb_timer(bomb_seconds)
             state.last_timer_second = bomb_seconds
 
-    # --- Kill tracking (trigger animation when player gets a kill) ---
     if kills is not None and state.last_kills >= 0 and kills > state.last_kills:
-        # Nowy kill - pokaż alert
         anim.play_player_killed(kills)
         state.last_kills = kills
     elif kills is not None:
-        state.last_kills = kills  # Sync even if no increase (round end, death, etc)
-    
-    # --- Kill counter overlay (zawsze wyświetl aktualną ilość kill'i) ---
-    # Wyświetl kill counter jeśli nie jest to bomb timer (żeby nie zagłusić odliczania)
+        state.last_kills = kills
+
     if kills is not None and kills >= 0:
         if bomb_state not in ("planted", "plant"):
-            # Nie ma bomby lub nie jest podłożona - mogę wyświetlić overlay
             anim.show_kill_counter(kills)
-        # Jeśli bomba jest podłożona - niech timer się wyświetla, kill counter sie aktualizuje w tle
     elif kills is None and round_phase in ("live",):
-        # Fallback na tryby gry gdzie player_state nie jest dostępny - wyświetl KILLS: 0
         anim.show_kill_counter(0)
 
-    # --- Zmiana fazy rundy ---
     if round_phase and round_phase != state.last_round_phase:
         if round_phase in ("freezetime", "freeze", "warmup"):
             anim.play_round_freezetime()
-            state.last_kills = -1  # Reset kill counter at round start
+            state.last_kills = -1
         elif round_phase in ("live",):
             anim.play_round_live()
         elif round_phase in ("over", "gameover"):
@@ -598,6 +674,27 @@ def handle_led_logic(cs2_state: dict[str, Any]) -> None:
 
         state.last_round_phase = round_phase
 
+
+def publish_events(cs2_state: dict[str, Any]) -> None:
+    if not config.PUBLISH_EVENTS:
+        return
+
+    for event in event_detector.detect(cs2_state):
+        publish_json(config.MQTT_TOPIC_EVENT, event.payload, retain=False)
+        publish_json(f"{config.MQTT_TOPIC_EVENT}/{event.type}", event.payload, retain=False)
+        logger.info("CS2 event: %s %s", event.type, event.text)
+
+
+@app.get("/health")
+def health_handler():
+    return jsonify(
+        {
+            "ok": True,
+            "mqtt_connected": state.mqtt_connected,
+            "last_gsi_seen_seconds_ago": _last_gsi_age_seconds(),
+            "status": state.last_status,
+        }
+    )
 
 
 @app.post(config.GSI_PATH)
@@ -612,7 +709,9 @@ def gsi_handler():
         if provided_token != config.GSI_TOKEN:
             return jsonify({"ok": False, "error": "unauthorized"}), 401
 
-    # Debug: log struktura payloadu
+    state.last_gsi_seen_monotonic = time.monotonic()
+    publish_status("online")
+
     bomb_data = payload.get("bomb", {})
     round_data = payload.get("round", {})
     phase_data = payload.get("phase_countdowns", {})
@@ -631,7 +730,6 @@ def gsi_handler():
         logger.debug("Player block content: %s", player_block)
     if player_data:
         logger.debug("Player state content: %s", player_data)
-    # Log weapons data if present
     for wkey in ("player_weapons", "allplayers_weapons", "weapons"):
         wdata = payload.get(wkey)
         if wdata:
@@ -645,6 +743,7 @@ def gsi_handler():
         state.last_raw_hash = payload_hash
 
     cs2_state = build_state(payload)
+    publish_events(cs2_state)
 
     if config.PUBLISH_STATE:
         compact_state = json.dumps(cs2_state, separators=(",", ":"), sort_keys=True)
@@ -652,29 +751,41 @@ def gsi_handler():
             publish(config.MQTT_TOPIC_STATE, compact_state, retain=False)
             state.last_published_state = compact_state
 
-    if config.LED_MODE == "event":
+    if config.LED_MODE in {"event", "mixed"}:
         handle_led_logic(cs2_state)
     return jsonify({"ok": True})
 
 
-
 def ensure_mqtt_connection() -> None:
-    """Initial connection attempt with retries. After connecting, paho handles reconnect."""
     while True:
         try:
             logger.info("Connecting to MQTT %s:%s", config.MQTT_HOST, config.MQTT_PORT)
             mqtt_client.connect(config.MQTT_HOST, config.MQTT_PORT, keepalive=config.MQTT_KEEPALIVE)
-            return  # success – paho loop_start will reconnect if needed
+            return
         except Exception as exc:
             logger.warning("MQTT connect failed: %s. Retrying in 5s...", exc)
             time.sleep(5)
+
+
+def status_watchdog() -> None:
+    while True:
+        time.sleep(5)
+        if state.last_gsi_seen_monotonic <= 0:
+            publish_status("waiting_for_cs2")
+            continue
+        age = time.monotonic() - state.last_gsi_seen_monotonic
+        if age > config.STATUS_OFFLINE_AFTER_SECONDS:
+            publish_status("offline")
+            event_detector.reset()
 
 
 def run() -> None:
     logger.info("Starting bridge on http://%s:%s%s", config.GSI_HOST, config.GSI_PORT, config.GSI_PATH)
     ensure_mqtt_connection()
 
-    # Flask in a daemon thread so paho loop_forever can own the main thread.
+    watchdog_thread = threading.Thread(target=status_watchdog, daemon=True)
+    watchdog_thread.start()
+
     flask_thread = threading.Thread(
         target=lambda: app.run(
             host=config.GSI_HOST,
@@ -686,7 +797,6 @@ def run() -> None:
     )
     flask_thread.start()
 
-    # Main thread drives the paho I/O loop; handles reconnect automatically.
     mqtt_client.loop_forever(retry_first_connection=True)
 
 
@@ -701,7 +811,6 @@ def kill_existing_instances() -> None:
             if proc.pid == current_pid:
                 continue
             cmdline = proc.info.get("cmdline") or []
-            # Match absolute path OR (relative name + same working directory)
             abs_match = any(os.path.abspath(arg) == current_script for arg in cmdline)
             cwd = ""
             try:
