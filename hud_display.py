@@ -24,9 +24,11 @@ class Config:
     MQTT_PASSWORD = os.getenv("MQTT_PASSWORD", "")
     MQTT_KEEPALIVE = int(os.getenv("MQTT_KEEPALIVE", "60"))
     MQTT_TOPIC_STATE = os.getenv("MQTT_TOPIC_STATE", "cs2/state")
+    MQTT_TOPIC_STATUS = os.getenv("MQTT_TOPIC_STATUS", "cs2/status")
     MQTT_TOPIC_LED = os.getenv("MQTT_TOPIC_LED", "all")
     HUD_CLIENT_ID = os.getenv("HUD_CLIENT_ID", "cs2-led-hud")
     HUD_REFRESH_MS = int(os.getenv("HUD_REFRESH_MS", "100"))
+    HUD_CLEAR_ON_OFFLINE = os.getenv("HUD_CLEAR_ON_OFFLINE", "true").lower() == "true"
 
 
 config = Config()
@@ -46,6 +48,7 @@ class HudDisplayClient:
         self._lock = threading.Lock()
         self._bomb_countdown_start: float | None = None
         self._initial_bomb_seconds: int | None = None
+        self._cs2_online = False
         self._client = mqtt.Client(
             mqtt.CallbackAPIVersion.VERSION2,
             client_id=config.HUD_CLIENT_ID,
@@ -71,10 +74,14 @@ class HudDisplayClient:
     def _tick(self) -> None:
         with self._lock:
             state = self._state
+            cs2_online = self._cs2_online
+
+        if config.HUD_CLEAR_ON_OFFLINE and not cs2_online:
+            self._publish_if_changed("")
+            return
 
         rendered_state = state
 
-        # Jeśli bomba jest podłożona, odliczaj czas lokalnie co sekundę
         if state.bomb_state == "planted" and state.bomb_seconds is not None:
             if self._bomb_countdown_start is None:
                 self._bomb_countdown_start = time.time()
@@ -83,15 +90,16 @@ class HudDisplayClient:
             elapsed = time.time() - self._bomb_countdown_start
             current_bomb_seconds = max(0, int(self._initial_bomb_seconds - elapsed))
 
-            # Tworzę kopię state ze zaktualizowanym bomb_seconds
             rendered_state = copy.copy(state)
             rendered_state.bomb_seconds = current_bomb_seconds
         else:
-            # Resetuj licznik jeśli bomba już nie jest aktywna
             self._bomb_countdown_start = None
             self._initial_bomb_seconds = None
 
         rendered = self._renderer.render(rendered_state)
+        self._publish_if_changed(rendered)
+
+    def _publish_if_changed(self, rendered: str) -> None:
         if rendered != self._last_render:
             self._client.publish(config.MQTT_TOPIC_LED, rendered, qos=1, retain=False)
             self._last_render = rendered
@@ -101,17 +109,30 @@ class HudDisplayClient:
         if reason_code == 0:
             logger.info("HUD connected to MQTT %s:%s", config.MQTT_HOST, config.MQTT_PORT)
             client.subscribe(config.MQTT_TOPIC_STATE, qos=1)
+            client.subscribe(config.MQTT_TOPIC_STATUS, qos=1)
         else:
             logger.error("HUD MQTT connect failed. reason_code=%s", reason_code)
 
     def _on_message(self, client: mqtt.Client, userdata: Any, message: mqtt.MQTTMessage) -> None:
+        topic = message.topic
         try:
             payload = json.loads(message.payload.decode("utf-8"))
         except Exception as exc:
-            logger.warning("Invalid HUD state payload: %s", exc)
+            logger.warning("Invalid HUD payload on %s: %s", topic, exc)
+            return
+
+        if topic == config.MQTT_TOPIC_STATUS:
+            status = str(payload.get("status") or "")
+            with self._lock:
+                self._cs2_online = status == "online"
+                if not self._cs2_online:
+                    self._bomb_countdown_start = None
+                    self._initial_bomb_seconds = None
+            logger.debug("HUD CS2 status: %s", status)
             return
 
         with self._lock:
+            self._cs2_online = True
             self._state = HudState(
                 activity=str(payload.get("activity") or ""),
                 round_phase=str(payload.get("round_phase") or ""),
@@ -124,7 +145,12 @@ class HudDisplayClient:
                 team=str(payload.get("team") or ""),
                 health=_to_int(payload.get("health")),
                 armor=_to_int(payload.get("armor")),
+                weapon=str(payload.get("weapon") or ""),
+                weapon_raw=str(payload.get("weapon_raw") or ""),
+                weapon_type=str(payload.get("weapon_type") or ""),
                 ammo=_to_int(payload.get("ammo")),
+                ammo_reserve=_to_int(payload.get("ammo_reserve")),
+                ammo_clip_max=_to_int(payload.get("ammo_clip_max")),
                 kills=_to_int(payload.get("kills")),
                 deaths=_to_int(payload.get("deaths")),
                 score=_to_int(payload.get("score")),
