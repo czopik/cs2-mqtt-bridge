@@ -9,6 +9,6 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 COPY . .
 
-EXPOSE 3000
+EXPOSE 3010
 
 CMD ["sh", "-c", "python -u main.py & python -u hud_display.py"]
