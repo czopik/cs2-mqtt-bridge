@@ -1,0 +1,9 @@
+services:
+  cs2-mqtt-bridge:
+    build: .
+    container_name: cs2-mqtt-bridge
+    restart: unless-stopped
+    env_file:
+      - .env
+    ports:
+      - "3000:3000"
