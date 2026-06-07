@@ -58,7 +58,7 @@ For Unraid keep:
 
 ```env
 GSI_HOST=0.0.0.0
-GSI_PORT=3000
+GSI_PORT=3010
 MQTT_HOST=192.168.1.249
 MQTT_PORT=1883
 MQTT_USERNAME=mqtt
@@ -76,8 +76,10 @@ docker logs -f cs2-mqtt-bridge
 The container exposes:
 
 ```text
-http://192.168.1.249:3000/gsi
+http://192.168.1.249:3010/gsi
 ```
+
+If port `3010` is already used on Unraid, change `GSI_PORT` in `.env`, rebuild the container, and use the same port in the CS2 GSI config file.
 
 ## 4) Configure CS2 GSI
 
@@ -91,7 +93,7 @@ Typical Steam path:
 For Unraid the important line in the GSI file is:
 
 ```text
-"uri" "http://192.168.1.249:3000/gsi"
+"uri" "http://192.168.1.249:3010/gsi"
 ```
 
 Important:
@@ -118,7 +120,7 @@ cd C:\Users\chemi\cs2-mqtt-bridge
 python hud_display.py
 ```
 
-Server starts on `http://127.0.0.1:3000/gsi` by default on Windows, or on `http://192.168.1.249:3000/gsi` when running on Unraid with the provided Docker configuration.
+Server starts on `http://127.0.0.1:3010/gsi` by default from the provided `.env.example`, or on `http://192.168.1.249:3010/gsi` when running on Unraid with the provided Docker configuration.
 
 ## 6) MQTT topics
 
@@ -138,74 +140,3 @@ The HUD avoids long Polish messages because they are not readable on 8x48 px. It
 - Normal game, page 3: `7-5`
 - Buy/freezetime: `BUY 12`
 - Bomb planted: `BOMB 34`
-- Last 10 bomb seconds: blinking `BOMB 09`
-- Low HP: blinking `LOW HP` / `HP09`
-- Death: `DEAD 12`
-- Kill popup: `K+18`
-- Defuse: `DEFUSE`
-- Explosion: blinking `BOOM`, then `T WIN`
-- Round result: `WIN` or `LOSE`
-
-## 8) Quick test without CS2
-
-When running on Unraid, test from Windows PowerShell:
-
-```powershell
-$body = @'
-{
-  "auth": {"token": "CHANGE_ME"},
-  "provider": {"timestamp": 1710000000},
-  "map": {
-    "name": "de_mirage",
-    "phase": "live",
-    "round": 12,
-    "team_ct": {"score": 7},
-    "team_t": {"score": 5}
-  },
-  "round": {"phase": "live"},
-  "player": {
-    "activity": "playing",
-    "team": "CT",
-    "name": "czopik",
-    "state": {"health": 84, "armor": 91, "round_kills": 1},
-    "match_stats": {"kills": 18, "deaths": 12, "score": 40},
-    "weapons": {
-      "weapon_0": {"name": "weapon_ak47", "state": "active", "ammo_clip": 23}
-    }
-  }
-}
-'@
-Invoke-RestMethod -Uri http://192.168.1.249:3000/gsi -Method Post -ContentType "application/json" -Body $body
-```
-
-If running locally on Windows, use:
-
-```powershell
-Invoke-RestMethod -Uri http://127.0.0.1:3000/gsi -Method Post -ContentType "application/json" -Body $body
-```
-
-Bomb test:
-
-```powershell
-$body = @'
-{
-  "auth": {"token": "CHANGE_ME"},
-  "provider": {"timestamp": 1710000000},
-  "map": {"name": "de_mirage", "phase": "live", "team_ct": {"score": 7}, "team_t": {"score": 5}},
-  "round": {"phase": "live", "bomb": "planted"},
-  "bomb": {"state": "planted"},
-  "phase_countdowns": {"phase": "bomb", "phase_ends_in": "34.2"},
-  "player": {"activity": "playing", "team": "CT", "state": {"health": 84, "armor": 91}, "match_stats": {"kills": 18, "deaths": 12}}
-}
-'@
-Invoke-RestMethod -Uri http://192.168.1.249:3000/gsi -Method Post -ContentType "application/json" -Body $body
-```
-
-If your `.env` token is not `CHANGE_ME`, set it in these test JSON bodies too.
-
-## 9) Notes
-
-- Use `LED_MODE=hud` for the clean 8x48 HUD.
-- `LED_MODE=event` still exists, but it can spam/overwrite the display with longer animation texts.
-- If CS2 changes payload fields, parsing may need adjustment in `main.py`.
-- If your matrix needs a different payload format than plain text, change `publish_led()` in `main.py` or the publish call in `hud_display.py`.
