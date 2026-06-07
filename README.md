@@ -10,11 +10,11 @@ It is tuned for a small LED matrix made from 6 x MAX7219-style 8x8 modules: **8x
 ## 1) Requirements
 
 - Windows PC with CS2
-- Python 3.11+
+- Python 3.11+ or Docker/Unraid
 - MQTT broker (for example Mosquitto)
 - LED matrix already listening on an MQTT topic (default `all`)
 
-## 2) Install
+## 2) Install on Windows
 
 ```powershell
 cd C:\Users\chemi\cs2-mqtt-bridge
@@ -42,7 +42,44 @@ HUD_WIDTH_CHARS=0
 
 `HUD_WIDTH_CHARS=0` means auto width. For a 48px-wide matrix with a 5x7 font and 1px spacing, the HUD uses 8 readable characters. Do not force long 12+ character messages unless your firmware scrolls them nicely.
 
-## 3) Configure CS2 GSI
+## 3) Install on Unraid / Docker
+
+Clone or copy this project to Unraid, for example:
+
+```bash
+cd /mnt/user/appdata
+git clone https://github.com/czopik/cs2-mqtt-bridge.git
+cd cs2-mqtt-bridge
+cp .env.example .env
+nano .env
+```
+
+For Unraid keep:
+
+```env
+GSI_HOST=0.0.0.0
+GSI_PORT=3000
+MQTT_HOST=192.168.1.249
+MQTT_PORT=1883
+MQTT_USERNAME=mqtt
+MQTT_PASSWORD=mqtt
+MQTT_TOPIC_LED=all
+```
+
+Start it:
+
+```bash
+docker compose up -d --build
+docker logs -f cs2-mqtt-bridge
+```
+
+The container exposes:
+
+```text
+http://192.168.1.249:3000/gsi
+```
+
+## 4) Configure CS2 GSI
 
 Copy file:
 - from `gsi\gamestate_integration_ledmatrix.cfg`
@@ -51,12 +88,19 @@ Copy file:
 Typical Steam path:
 - `C:\Program Files (x86)\Steam\steamapps\common\Counter-Strike Global Offensive\game\csgo\cfg\`
 
+For Unraid the important line in the GSI file is:
+
+```text
+"uri" "http://192.168.1.249:3000/gsi"
+```
+
 Important:
 - Set the same token in both places:
   - `.env` -> `GSI_TOKEN`
   - `gamestate_integration_ledmatrix.cfg` -> `auth` -> `token`
+- Restart CS2 after changing the GSI file.
 
-## 4) Run
+## 5) Run on Windows
 
 Run the bridge first:
 
@@ -74,9 +118,9 @@ cd C:\Users\chemi\cs2-mqtt-bridge
 python hud_display.py
 ```
 
-Server starts on `http://127.0.0.1:3000/gsi` by default.
+Server starts on `http://127.0.0.1:3000/gsi` by default on Windows, or on `http://192.168.1.249:3000/gsi` when running on Unraid with the provided Docker configuration.
 
-## 5) MQTT topics
+## 6) MQTT topics
 
 From `.env`:
 - `MQTT_TOPIC_RAW` default `cs2/raw`
@@ -85,7 +129,7 @@ From `.env`:
 
 `main.py` publishes normalized state to `cs2/state`. `hud_display.py` reads `cs2/state`, renders short HUD pages, and publishes text to the LED topic.
 
-## 6) HUD behavior for 8x48 matrix
+## 7) HUD behavior for 8x48 matrix
 
 The HUD avoids long Polish messages because they are not readable on 8x48 px. It shows short ASCII panels:
 
@@ -102,9 +146,9 @@ The HUD avoids long Polish messages because they are not readable on 8x48 px. It
 - Explosion: blinking `BOOM`, then `T WIN`
 - Round result: `WIN` or `LOSE`
 
-## 7) Quick test without CS2
+## 8) Quick test without CS2
 
-Start `main.py` and `hud_display.py`, then run this in PowerShell:
+When running on Unraid, test from Windows PowerShell:
 
 ```powershell
 $body = @'
@@ -131,6 +175,12 @@ $body = @'
   }
 }
 '@
+Invoke-RestMethod -Uri http://192.168.1.249:3000/gsi -Method Post -ContentType "application/json" -Body $body
+```
+
+If running locally on Windows, use:
+
+```powershell
 Invoke-RestMethod -Uri http://127.0.0.1:3000/gsi -Method Post -ContentType "application/json" -Body $body
 ```
 
@@ -148,12 +198,12 @@ $body = @'
   "player": {"activity": "playing", "team": "CT", "state": {"health": 84, "armor": 91}, "match_stats": {"kills": 18, "deaths": 12}}
 }
 '@
-Invoke-RestMethod -Uri http://127.0.0.1:3000/gsi -Method Post -ContentType "application/json" -Body $body
+Invoke-RestMethod -Uri http://192.168.1.249:3000/gsi -Method Post -ContentType "application/json" -Body $body
 ```
 
 If your `.env` token is not `CHANGE_ME`, set it in these test JSON bodies too.
 
-## 8) Notes
+## 9) Notes
 
 - Use `LED_MODE=hud` for the clean 8x48 HUD.
 - `LED_MODE=event` still exists, but it can spam/overwrite the display with longer animation texts.
