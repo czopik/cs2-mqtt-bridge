@@ -45,12 +45,15 @@ def _env_int(name: str, fallback: int) -> int:
 
 
 class HudRenderer:
-    """Simple lowercase HUD for a tiny 8x48 LED matrix.
+    """Stable lowercase HUD for a tiny LED matrix.
+
+    It intentionally does NOT rotate pages. Normal state is always hp+kills.
 
     Priority:
-    1. bomb timer / bomb result
-    2. kill or death popup with kills/deaths
-    3. constant hp + kills display
+    1. planted bomb countdown:  bomb 34
+    2. bomb result popup:       defuse / boom
+    3. kill/death popup:        k2 d7
+    4. normal HUD:              hp100 k1
     """
 
     def __init__(self) -> None:
@@ -61,7 +64,6 @@ class HudRenderer:
         calculated_width = max(4, (modules * 8) // (font_columns + char_spacing))
         self.width = explicit_width or calculated_width
 
-        self._boom_started_at = 0.0
         self._boom_until = 0.0
         self._defuse_until = 0.0
         self._kd_popup_until = 0.0
@@ -69,61 +71,30 @@ class HudRenderer:
         self._last_bomb_state = ""
         self._last_kills: int | None = None
         self._last_deaths: int | None = None
-        self._last_mode = ""
+        self._last_render = ""
 
     def render(self, state: HudState, now: float | None = None) -> str:
         now = time.monotonic() if now is None else now
         self._update_effects(state, now)
-        mode = self._resolve_mode(state, now)
 
-        if mode != self._last_mode:
-            logger.debug(
-                "HUD mode=%s hp=%s kills=%s deaths=%s bomb_state=%s bomb_seconds=%s",
-                mode,
-                state.health,
-                state.kills,
-                state.deaths,
-                state.bomb_state or "-",
-                state.bomb_seconds,
-            )
-            self._last_mode = mode
-
-        if mode == "boom":
-            return self.drawStaticText("boom")
-        if mode == "defuse":
-            return self.drawStaticText("defuse")
-        if mode == "bomb":
-            return self._render_bomb(state, now)
-        if mode == "kd":
-            return self.drawStaticText(self._kd_popup_text or self._render_kd(state))
-        if mode == "ready":
-            return self.drawStaticText("cs2")
-        return self.drawStaticText(self._render_hp_kills(state))
-
-    def _resolve_mode(self, state: HudState, now: float) -> str:
         bomb_state = (state.bomb_state or "").lower()
-        activity = (state.activity or "").lower()
-
-        if bomb_state in {"exploded", "explode"} and now < self._boom_until:
-            return "boom"
-
-        if bomb_state in {"defused", "defuse"} and now < self._defuse_until:
-            return "defuse"
-
         if bomb_state in {"planted", "plant"} and state.bomb_seconds is not None:
-            return "bomb"
+            rendered = self._fit(f"bomb {self._n(state.bomb_seconds, 0):02d}")
+        elif bomb_state in {"defused", "defuse"} and now < self._defuse_until:
+            rendered = self._fit("defuse")
+        elif bomb_state in {"exploded", "explode"} and now < self._boom_until:
+            rendered = self._fit("boom")
+        elif now < self._kd_popup_until and self._kd_popup_text:
+            rendered = self._fit(self._kd_popup_text)
+        elif state.activity == "menu" or (state.health is None and state.kills is None):
+            rendered = self._fit("cs2")
+        else:
+            rendered = self._fit(self._render_hp_kills(state))
 
-        if now < self._kd_popup_until and self._kd_popup_text:
-            return "kd"
-
-        # If player is dead and CS2 still reports health 0, keep showing K/D.
-        if state.health == 0:
-            return "kd"
-
-        if activity == "menu" or (state.health is None and state.kills is None and state.deaths is None):
-            return "ready"
-
-        return "normal"
+        if rendered != self._last_render:
+            logger.debug("HUD render: %r", rendered)
+            self._last_render = rendered
+        return rendered
 
     def _update_effects(self, state: HudState, now: float) -> None:
         bomb_state = (state.bomb_state or "").lower()
@@ -131,7 +102,6 @@ class HudRenderer:
         current_deaths = state.deaths
 
         if bomb_state in {"exploded", "explode"} and self._last_bomb_state != bomb_state:
-            self._boom_started_at = now
             self._boom_until = now + 3.0
 
         if bomb_state in {"defused", "defuse"} and self._last_bomb_state != bomb_state:
@@ -161,37 +131,29 @@ class HudRenderer:
     def _render_hp_kills(self, state: HudState) -> str:
         hp = self._n(state.health, 0)
         kills = self._n(state.kills, 0)
-
-        # Prefer requested format. For width=8, hp100 k12 is too long, so remove space.
-        candidates = [
-            f"hp{hp} k{kills}",
-            f"hp{hp}k{kills}",
-            f"h{hp} k{kills}",
-            f"h{hp}k{kills}",
-        ]
-        return self._first_that_fits(candidates)
+        return self._first_that_fits(
+            [
+                f"hp{hp} k{kills}",
+                f"hp{hp}k{kills}",
+                f"h{hp} k{kills}",
+                f"h{hp}k{kills}",
+            ]
+        )
 
     def _render_kd(self, state: HudState) -> str:
         kills = self._n(state.kills, 0)
         deaths = self._n(state.deaths, 0)
-        candidates = [
-            f"k{kills} d{deaths}",
-            f"k{kills}d{deaths}",
-        ]
-        return self._first_that_fits(candidates)
-
-    def _render_bomb(self, state: HudState, now: float) -> str:
-        secs = self._n(state.bomb_seconds, 0)
-        text = self.drawStaticText(f"bomb {secs:02d}")
-        if secs <= 10:
-            return text if int(now / 0.25) % 2 == 0 else self.drawStaticText("")
-        return text
+        return self._first_that_fits([f"k{kills} d{deaths}", f"k{kills}d{deaths}"])
 
     def _first_that_fits(self, candidates: list[str]) -> str:
         for candidate in candidates:
             if len(self._clean_text(candidate)) <= self.width:
                 return candidate
         return candidates[-1]
+
+    def _fit(self, text: str) -> str:
+        # Important: no padding. Some matrix firmwares scroll or animate padded text.
+        return self._clean_text(text)[: self.width]
 
     def _n(self, value: int | None, fallback: int) -> int:
         if value is None:
@@ -219,12 +181,8 @@ class HudRenderer:
         return re.sub(r"\s+", " ", text).strip()
 
     def drawStaticText(self, text: str, align: str = "left") -> str:
-        cleaned = self._clean_text(text)
-        clipped = cleaned[: self.width]
-        if align == "right":
-            return clipped.rjust(self.width)
-        return clipped.ljust(self.width)
+        # Kept for compatibility with older code, but now it never uppercases and never pads.
+        return self._fit(text)
 
     def drawSplitStaticText(self, left: str, right: str) -> str:
-        combined = f"{left} {right}".strip()
-        return self.drawStaticText(combined)
+        return self._fit(f"{left} {right}".strip())
