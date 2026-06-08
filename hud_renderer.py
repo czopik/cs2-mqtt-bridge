@@ -48,10 +48,10 @@ def _env_int(name: str, fallback: int) -> int:
 
 
 class HudRenderer:
-    """Compact lowercase HUD for a tiny 8x48 LED matrix.
+    """Compact lowercase HUD for a tiny LED matrix.
 
-    Base screen is stable: k/d/h, for example `k1d3h100`.
-    Temporary event screens intentionally stay short and lowercase.
+    Base screen is stable and spaced: `k5 d0 h100`.
+    If the configured width is too small, it gracefully falls back to shorter forms.
 
     Priority:
     1. planted bomb countdown: p40, p39, p38...
@@ -59,7 +59,7 @@ class HudRenderer:
     3. kill/death popup:       kill 2 / death 4
     4. ammo popup after shot:  a13 or a13/90
     5. round/map popup:       7-5win / nuke
-    6. menu/loading/base HUD:  menu / map / k1d3h100
+    6. menu/loading/base HUD:  menu / map / k5 d0 h100
     """
 
     def __init__(self) -> None:
@@ -190,8 +190,9 @@ class HudRenderer:
         hp = self._n(state.health, 0)
         return self._first_that_fits(
             [
+                f"k{kills} d{deaths} h{hp}",
                 f"k{kills}d{deaths}h{hp}",
-                f"k{kills}d{deaths}h{min(hp, 99)}",
+                f"k{kills} d{deaths}",
                 f"k{kills}d{deaths}",
                 f"h{hp}",
             ]
