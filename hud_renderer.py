@@ -51,7 +51,8 @@ class HudRenderer:
     """Compact lowercase HUD for a tiny LED matrix.
 
     Base screen is stable and spaced: `k5 d0 h100`.
-    HUD width is forced to at least 10 chars so this spaced format is preferred.
+    Bomb countdown is displayed as `boom:40`, `boom:39`, ...
+    HUD width is forced to at least 10 chars so the preferred formats fit.
     """
 
     def __init__(self) -> None:
@@ -84,7 +85,7 @@ class HudRenderer:
 
         bomb_state = (state.bomb_state or "").lower()
         if bomb_state in {"planted", "plant"} and state.bomb_seconds is not None:
-            rendered = self._fit(f"p{self._n(state.bomb_seconds, 0):02d}")
+            rendered = self._fit(self._render_bomb_countdown(state.bomb_seconds))
         elif bomb_state in {"defused", "defuse"} and now < self._defuse_until:
             rendered = self._fit("defuse")
         elif bomb_state in {"exploded", "explode"} and now < self._boom_until:
@@ -186,6 +187,16 @@ class HudRenderer:
             ]
         )
 
+    def _render_bomb_countdown(self, seconds: int | None) -> str:
+        secs = self._n(seconds, 0)
+        return self._first_that_fits(
+            [
+                f"boom:{secs:02d}",
+                f"boom{secs:02d}",
+                f"b{secs:02d}",
+            ]
+        )
+
     def _render_ammo(self, state: HudState) -> str:
         ammo = self._n(state.ammo, 0)
         reserve = state.ammo_reserve
@@ -266,7 +277,7 @@ class HudRenderer:
             }
         )
         text = text.translate(replacements)
-        text = re.sub(r"[^a-z0-9 +\-/]", " ", text)
+        text = re.sub(r"[^a-z0-9 +\-/:]", " ", text)
         return re.sub(r"\s+", " ", text).strip()
 
     def drawStaticText(self, text: str, align: str = "left") -> str:
