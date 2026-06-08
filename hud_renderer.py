@@ -50,7 +50,8 @@ def _env_int(name: str, fallback: int) -> int:
 class HudRenderer:
     """Compact lowercase HUD for a tiny LED matrix.
 
-    Base screen is stable and spaced: `k5 d0 h100`.
+    Base screen is stable: `k:10 d:50`.
+    Damage popup is temporary: `h:85 a90`.
     Bomb countdown is displayed as `boom:40`, `boom:39`, ...
     HUD width is forced to at least 10 chars so the preferred formats fit.
     """
@@ -64,11 +65,13 @@ class HudRenderer:
         self._round_result_until = 0.0
         self._map_popup_until = 0.0
         self._kd_popup_until = 0.0
+        self._damage_popup_until = 0.0
         self._ammo_popup_until = 0.0
 
         self._round_result_text = ""
         self._map_popup_text = ""
         self._kd_popup_text = ""
+        self._damage_popup_text = ""
         self._ammo_popup_text = ""
 
         self._last_bomb_state = ""
@@ -76,6 +79,8 @@ class HudRenderer:
         self._last_map = ""
         self._last_kills: int | None = None
         self._last_deaths: int | None = None
+        self._last_health: int | None = None
+        self._last_armor: int | None = None
         self._last_ammo: int | None = None
         self._last_render = ""
 
@@ -92,6 +97,8 @@ class HudRenderer:
             rendered = self._fit("boom")
         elif now < self._kd_popup_until and self._kd_popup_text:
             rendered = self._fit(self._kd_popup_text)
+        elif now < self._damage_popup_until and self._damage_popup_text:
+            rendered = self._fit(self._damage_popup_text)
         elif now < self._ammo_popup_until and self._ammo_popup_text:
             rendered = self._fit(self._ammo_popup_text)
         elif now < self._round_result_until and self._round_result_text:
@@ -116,6 +123,8 @@ class HudRenderer:
         current_map = self._map_name(state.map)
         current_kills = state.kills
         current_deaths = state.deaths
+        current_health = state.health
+        current_armor = state.armor
         current_ammo = state.ammo
 
         if bomb_state in {"exploded", "explode"} and self._last_bomb_state != bomb_state:
@@ -152,6 +161,21 @@ class HudRenderer:
             self._kd_popup_text = self._first_that_fits([f"death {self._n(current_deaths, 0)}", f"d{self._n(current_deaths, 0)}"])
             self._kd_popup_until = now + 2.0
 
+        health_decreased = (
+            self._last_health is not None
+            and current_health is not None
+            and current_health < self._last_health
+        )
+        armor_decreased = (
+            self._last_armor is not None
+            and current_armor is not None
+            and current_armor < self._last_armor
+        )
+        if (health_decreased or armor_decreased) and bomb_state not in {"planted", "plant"}:
+            self._damage_popup_text = self._render_health_armor(state)
+            # Every new HP/armor drop extends the popup. It stays for 1s after the last drop.
+            self._damage_popup_until = now + 1.0
+
         ammo_decreased = (
             self._last_ammo is not None
             and current_ammo is not None
@@ -166,6 +190,10 @@ class HudRenderer:
             self._last_kills = current_kills
         if current_deaths is not None:
             self._last_deaths = current_deaths
+        if current_health is not None:
+            self._last_health = current_health
+        if current_armor is not None:
+            self._last_armor = current_armor
         if current_ammo is not None:
             self._last_ammo = current_ammo
         self._last_bomb_state = bomb_state
@@ -176,13 +204,22 @@ class HudRenderer:
     def _render_default(self, state: HudState) -> str:
         kills = self._n(state.kills, 0)
         deaths = self._n(state.deaths, 0)
-        hp = self._n(state.health, 0)
         return self._first_that_fits(
             [
-                f"k{kills} d{deaths} h{hp}",
-                f"k{kills}d{deaths}h{hp}",
+                f"k:{kills} d:{deaths}",
                 f"k{kills} d{deaths}",
                 f"k{kills}d{deaths}",
+            ]
+        )
+
+    def _render_health_armor(self, state: HudState) -> str:
+        hp = self._n(state.health, 0)
+        armor = self._n(state.armor, 0)
+        return self._first_that_fits(
+            [
+                f"h:{hp} a{armor}",
+                f"h{hp} a{armor}",
+                f"h{hp}a{armor}",
                 f"h{hp}",
             ]
         )
