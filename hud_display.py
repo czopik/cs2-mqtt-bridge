@@ -28,7 +28,9 @@ class Config:
     MQTT_TOPIC_LED = os.getenv("MQTT_TOPIC_LED", "all")
     HUD_CLIENT_ID = os.getenv("HUD_CLIENT_ID", "cs2-led-hud")
     HUD_REFRESH_MS = int(os.getenv("HUD_REFRESH_MS", "100"))
-    HUD_CLEAR_ON_OFFLINE = os.getenv("HUD_CLEAR_ON_OFFLINE", "true").lower() == "true"
+    # Default false: do not blank the matrix just because an old .env misses this setting.
+    # Fresh cs2/state should always drive the HUD.
+    HUD_CLEAR_ON_OFFLINE = os.getenv("HUD_CLEAR_ON_OFFLINE", "false").lower() == "true"
     HUD_STALE_AFTER_SECONDS = int(os.getenv("HUD_STALE_AFTER_SECONDS", "60"))
 
 
@@ -163,7 +165,7 @@ class HudDisplayClient:
     def _handle_status(self, payload: dict[str, Any]) -> None:
         status = str(payload.get("status") or "").lower()
         with self._lock:
-            # Only an explicit CS2 offline status is allowed to clear the HUD.
+            # Only an explicit CS2 offline status is allowed to clear the HUD when HUD_CLEAR_ON_OFFLINE=true.
             # Bridge-only statuses like "bridge_online" must not hide a valid cs2/state.
             if status == "offline":
                 self._offline_requested = True
