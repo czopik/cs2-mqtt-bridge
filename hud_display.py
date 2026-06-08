@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import copy
 import json
 import logging
 import os
@@ -44,8 +43,6 @@ class HudDisplayClient:
         self._state = HudState(activity="menu")
         self._last_render = None
         self._lock = threading.Lock()
-        self._bomb_countdown_start: float | None = None
-        self._initial_bomb_seconds: int | None = None
         self._client = mqtt.Client(
             mqtt.CallbackAPIVersion.VERSION2,
             client_id=config.HUD_CLIENT_ID,
@@ -72,23 +69,10 @@ class HudDisplayClient:
         with self._lock:
             state = self._state
 
-        rendered_state = state
-
-        if state.bomb_state in {"planted", "plant"} and state.bomb_seconds is not None:
-            if self._bomb_countdown_start is None:
-                self._bomb_countdown_start = time.time()
-                self._initial_bomb_seconds = state.bomb_seconds
-
-            elapsed = time.time() - self._bomb_countdown_start
-            current_bomb_seconds = max(0, int(self._initial_bomb_seconds - elapsed))
-
-            rendered_state = copy.copy(state)
-            rendered_state.bomb_seconds = current_bomb_seconds
-        else:
-            self._bomb_countdown_start = None
-            self._initial_bomb_seconds = None
-
-        rendered = self._renderer.render(rendered_state)
+        # Bomb time is intentionally not counted locally here.
+        # main.py publishes bomb_seconds from CS2 GSI phase_countdowns when available,
+        # so using state.bomb_seconds avoids drift between the game and LED display.
+        rendered = self._renderer.render(state)
         self._publish_if_changed(rendered)
 
     def _publish_if_changed(self, rendered: str) -> None:
