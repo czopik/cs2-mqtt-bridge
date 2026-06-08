@@ -51,24 +51,12 @@ class HudRenderer:
     """Compact lowercase HUD for a tiny LED matrix.
 
     Base screen is stable and spaced: `k5 d0 h100`.
-    If the configured width is too small, it gracefully falls back to shorter forms.
-
-    Priority:
-    1. planted bomb countdown: p40, p39, p38...
-    2. bomb result popup:      defuse / boom
-    3. kill/death popup:       kill 2 / death 4
-    4. ammo popup after shot:  a13 or a13/90
-    5. round/map popup:       7-5win / nuke
-    6. menu/loading/base HUD:  menu / map / k5 d0 h100
+    HUD width is forced to at least 10 chars so this spaced format is preferred.
     """
 
     def __init__(self) -> None:
-        modules = max(1, _env_int("HUD_MATRIX_MODULES", 6))
-        font_columns = max(4, _env_int("HUD_FONT_COLUMNS", 5))
-        char_spacing = max(0, _env_int("HUD_CHAR_SPACING", 1))
-        explicit_width = _env_int("HUD_WIDTH_CHARS", 0)
-        calculated_width = max(4, (modules * 8) // (font_columns + char_spacing))
-        self.width = explicit_width or calculated_width
+        configured_width = _env_int("HUD_WIDTH_CHARS", 10)
+        self.width = max(10, configured_width)
 
         self._boom_until = 0.0
         self._defuse_until = 0.0
@@ -254,7 +242,6 @@ class HudRenderer:
         return candidates[-1]
 
     def _fit(self, text: str) -> str:
-        # Important: no padding. Some matrix firmwares scroll or animate padded text.
         return self._clean_text(text)[: self.width]
 
     def _n(self, value: int | None, fallback: int) -> int:
@@ -283,7 +270,6 @@ class HudRenderer:
         return re.sub(r"\s+", " ", text).strip()
 
     def drawStaticText(self, text: str, align: str = "left") -> str:
-        # Kept for compatibility with older code, but now it never uppercases and never pads.
         return self._fit(text)
 
     def drawSplitStaticText(self, left: str, right: str) -> str:
