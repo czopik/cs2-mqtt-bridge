@@ -64,6 +64,7 @@ For Unraid keep:
 GSI_HOST=0.0.0.0
 GSI_PORT=3010
 UNRAID_HOST=192.168.1.249
+GSI_TOKEN=your-private-token-here
 MQTT_HOST=192.168.1.249
 MQTT_PORT=1883
 MQTT_USERNAME=mqtt
@@ -88,12 +89,54 @@ If port `3010` is already used on Unraid, change `GSI_PORT` in `.env`, rebuild t
 
 ## 4) Configure CS2 GSI
 
-### Option A: manual copy
+The file in `gsi\gamestate_integration_ledmatrix.cfg` is only a template. Do not leave `PUT_YOUR_LOCAL_GSI_TOKEN_HERE` in the real CS2 config. The token must be the same as `GSI_TOKEN` from your local `.env`.
+
+### Recommended: automatic Windows installer
+
+Run this on the Windows PC where CS2 is installed:
+
+```powershell
+python install_gsi.py
+```
+
+The script reads your local `.env`, takes `GSI_TOKEN`, `UNRAID_HOST`, `GSI_PORT` and `GSI_PATH`, then writes the real file:
+
+```text
+Counter-Strike Global Offensive\game\csgo\cfg\gamestate_integration_ledmatrix.cfg
+```
+
+If `GSI_TOKEN` is empty or still set to `CHANGE_ME`, the installer stops and tells you to fix `.env` first. This prevents accidentally running CS2 with a broken token.
+
+If Steam is installed in a custom place, set:
+
+```env
+CS2_CFG_DIR=C:\Your\SteamLibrary\steamapps\common\Counter-Strike Global Offensive\game\csgo\cfg
+```
+
+or generate to a chosen path:
+
+```powershell
+python install_gsi.py --output "C:\path\to\gamestate_integration_ledmatrix.cfg"
+```
+
+### Manual copy
 
 Copy file:
 
 - from `gsi\gamestate_integration_ledmatrix.cfg`
 - to `Counter-Strike\game\csgo\cfg\gamestate_integration_ledmatrix.cfg`
+
+Then edit this line manually:
+
+```text
+"token" "PUT_YOUR_LOCAL_GSI_TOKEN_HERE"
+```
+
+and replace it with the same token you have in `.env`:
+
+```env
+GSI_TOKEN=your-private-token-here
+```
 
 Typical Steam path:
 
@@ -113,22 +156,6 @@ Important:
   - `.env` -> `GSI_TOKEN`
   - `gamestate_integration_ledmatrix.cfg` -> `auth` -> `token`
 - Restart CS2 after changing the GSI file.
-
-### Option B: automatic Windows installer
-
-Run this on the Windows PC where CS2 is installed:
-
-```powershell
-python install_gsi.py
-```
-
-The script tries to find your CS2 `cfg` folder and writes `gamestate_integration_ledmatrix.cfg` automatically.
-
-If Steam is installed in a custom place, set:
-
-```env
-CS2_CFG_DIR=C:\Your\SteamLibrary\steamapps\common\Counter-Strike Global Offensive\game\csgo\cfg
-```
 
 ## 5) Run on Windows
 
@@ -168,7 +195,7 @@ From `.env`:
 {
   "health": 84,
   "armor": 91,
-  "weapon": "AK",
+  "weapon": "ak",
   "weapon_raw": "weapon_ak47",
   "ammo": 18,
   "ammo_reserve": 90,
@@ -187,7 +214,7 @@ From `.env`:
 ```json
 {
   "type": "player_kill",
-  "text": "K+12",
+  "text": "k+12",
   "kills": 12,
   "delta": 1
 }
@@ -221,20 +248,17 @@ Other useful events include:
 }
 ```
 
-If CS2 stops sending GSI updates for `STATUS_OFFLINE_AFTER_SECONDS`, the status changes to `offline`. By default `hud_display.py` clears the LED matrix when CS2 goes offline.
-
 ## 7) HUD behavior for 8x48 matrix
 
-The HUD avoids long Polish messages because they are not readable on 8x48 px. It shows short ASCII panels:
+Current simple HUD behavior:
 
-- Normal game, page 1: `HP84 K18`
-- Normal game, page 2: `AK18/90`
-- Fallback page 2 without weapon: `A91 AM23`
-- Normal game, page 3: `7-5`
-- Buy/freezetime: `BUY 12`
-- Bomb planted: `BOMB 34`
-- Low health: `LOW HP`
-- Kill popup: `K+02`
+- Normal: `hp100 k1`
+- After kill/death popup: `k2 d7`
+- Bomb planted: `bomb 34`
+- Bomb defused: `defuse`
+- Bomb exploded: `boom`
+
+The HUD uses lowercase text and does not rotate through armor/ammo/map pages.
 
 ## 8) Quick MQTT test
 
