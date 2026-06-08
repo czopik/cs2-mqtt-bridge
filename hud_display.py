@@ -29,6 +29,7 @@ class Config:
     HUD_CLIENT_ID = os.getenv("HUD_CLIENT_ID", "cs2-led-hud")
     HUD_REFRESH_MS = int(os.getenv("HUD_REFRESH_MS", "100"))
     HUD_CLEAR_ON_OFFLINE = os.getenv("HUD_CLEAR_ON_OFFLINE", "true").lower() == "true"
+    HUD_STALE_AFTER_SECONDS = int(os.getenv("HUD_STALE_AFTER_SECONDS", "60"))
 
 
 config = Config()
@@ -48,7 +49,8 @@ class HudDisplayClient:
         self._lock = threading.Lock()
         self._bomb_countdown_start: float | None = None
         self._initial_bomb_seconds: int | None = None
-        self._cs2_online = False
+        self._last_state_seen = 0.0
+        self._offline_requested = False
         self._client = mqtt.Client(
             mqtt.CallbackAPIVersion.VERSION2,
             client_id=config.HUD_CLIENT_ID,
@@ -74,9 +76,11 @@ class HudDisplayClient:
     def _tick(self) -> None:
         with self._lock:
             state = self._state
-            cs2_online = self._cs2_online
+            last_state_seen = self._last_state_seen
+            offline_requested = self._offline_requested
 
-        if config.HUD_CLEAR_ON_OFFLINE and not cs2_online:
+        stale = last_state_seen <= 0 or (time.monotonic() - last_state_seen) > config.HUD_STALE_AFTER_SECONDS
+        if config.HUD_CLEAR_ON_OFFLINE and (offline_requested or stale):
             self._publish_if_changed("")
             return
 
@@ -122,17 +126,12 @@ class HudDisplayClient:
             return
 
         if topic == config.MQTT_TOPIC_STATUS:
-            status = str(payload.get("status") or "")
-            with self._lock:
-                self._cs2_online = status == "online"
-                if not self._cs2_online:
-                    self._bomb_countdown_start = None
-                    self._initial_bomb_seconds = None
-            logger.debug("HUD CS2 status: %s", status)
+            self._handle_status(payload)
             return
 
         with self._lock:
-            self._cs2_online = True
+            self._offline_requested = False
+            self._last_state_seen = time.monotonic()
             self._state = HudState(
                 activity=str(payload.get("activity") or ""),
                 round_phase=str(payload.get("round_phase") or ""),
@@ -160,6 +159,21 @@ class HudDisplayClient:
                 name=str(payload.get("name") or ""),
             )
         logger.debug("HUD state update: %s", self._state)
+
+    def _handle_status(self, payload: dict[str, Any]) -> None:
+        status = str(payload.get("status") or "").lower()
+        with self._lock:
+            # Only an explicit CS2 offline status is allowed to clear the HUD.
+            # Bridge-only statuses like "bridge_online" must not hide a valid cs2/state.
+            if status == "offline":
+                self._offline_requested = True
+                self._bomb_countdown_start = None
+                self._initial_bomb_seconds = None
+            elif status == "online":
+                self._offline_requested = False
+            elif status == "waiting_for_cs2" and self._last_state_seen <= 0:
+                self._offline_requested = True
+        logger.debug("HUD CS2 status: %s", status)
 
 
 def _to_int(value: Any) -> int | None:
