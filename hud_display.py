@@ -47,8 +47,8 @@ class HudDisplayClient:
         self._lock = threading.Lock()
 
         # CS2 GSI sometimes sends bomb time in larger jumps. The display uses the
-        # newest GSI value as a sync point and counts down locally every second
-        # between updates. That keeps the LED smooth: p40, p39, p38...
+        # newest GSI value as a sync point and counts down locally between updates.
+        # floor() avoids keeping e.g. boom:40 visible for one second too long.
         self._bomb_started_monotonic: float | None = None
         self._bomb_initial_seconds: int | None = None
         self._last_bomb_state = ""
@@ -93,8 +93,7 @@ class HudDisplayClient:
             return self._state.bomb_seconds
 
         elapsed = time.monotonic() - self._bomb_started_monotonic
-        # ceil keeps p40 visible for the first second, then p39, p38...
-        return max(0, int(math.ceil(self._bomb_initial_seconds - elapsed)))
+        return max(0, int(math.floor(self._bomb_initial_seconds - elapsed)))
 
     def _sync_bomb_countdown_locked(self, new_state: HudState) -> None:
         bomb_state = (new_state.bomb_state or "").lower()
