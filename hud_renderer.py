@@ -45,11 +45,7 @@ def _env_int(name: str, fallback: int) -> int:
 
 
 class HudRenderer:
-    """Static 8px-high LED matrix renderer.
-
-    6 x 8x8 modules = 8x48 px. With a 5x7 font and one spacing column this
-    gives about 8 readable characters. Keep panels short and ASCII-only.
-    """
+    """Static 8px-high LED matrix renderer for a tiny 8x48 display."""
 
     def __init__(self) -> None:
         modules = max(1, _env_int("HUD_MATRIX_MODULES", 6))
@@ -230,13 +226,16 @@ class HudRenderer:
         )
 
     def _render_normal(self, state: HudState, now: float) -> str:
-        health = self._n(state.health, 0)
-        armor = self._n(state.armor, 0)
-        ammo = self._n(state.ammo, 0)
+        health = state.health
+        armor = state.armor
+        ammo = state.ammo
         kills = self._n(state.kills, 0)
         score_str = self._score_str(state)
 
-        if 0 < health <= 20:
+        if health is None and ammo is None and state.weapon == "":
+            return self.drawStaticText("CS2 RDY")
+
+        if health is not None and 0 < health <= 20:
             if int(now / 0.4) % 2 == 0:
                 return self.drawStaticText("LOW HP")
             return self.drawStaticText(f"HP{health:02d}")
@@ -244,19 +243,35 @@ class HudRenderer:
         page_count = 3 if score_str else 2
         page = int(now / 2.0) % page_count
         if page == 0:
-            return self.drawStaticText(f"HP{health:02d} K{kills:02d}")
+            if health is not None:
+                return self.drawStaticText(f"HP{health:02d} K{kills:02d}")
+            return self.drawStaticText(f"KILLS {kills:02d}")
         if page == 1:
             return self._render_weapon_page(state, armor, ammo)
         return self.drawStaticText(score_str)
 
-    def _render_weapon_page(self, state: HudState, armor: int, ammo: int) -> str:
+    def _render_weapon_page(self, state: HudState, armor: int | None, ammo: int | None) -> str:
         weapon = self._clean_text(state.weapon or "")[:4]
         reserve = state.ammo_reserve
-        if weapon and ammo >= 0:
+
+        if weapon and ammo is not None:
             if reserve is not None and self.width >= 8:
-                return self.drawStaticText(f"{weapon}{ammo:02d}/{self._n(reserve, 999):02d}")
-            return self.drawStaticText(f"{weapon} {ammo:02d}")
-        return self.drawStaticText(f"A{armor:02d} AM{ammo:02d}")
+                return self.drawStaticText(f"{weapon}{self._n(ammo, 999):02d}/{self._n(reserve, 999):02d}")
+            return self.drawStaticText(f"{weapon} {self._n(ammo, 999):02d}")
+
+        if weapon:
+            return self.drawStaticText(weapon)
+
+        if armor is not None and ammo is not None:
+            return self.drawStaticText(f"A{self._n(armor, 999):02d} AM{self._n(ammo, 999):02d}")
+
+        if armor is not None:
+            return self.drawStaticText(f"ARM {self._n(armor, 999):02d}")
+
+        if ammo is not None:
+            return self.drawStaticText(f"AMMO {self._n(ammo, 999):02d}")
+
+        return self.drawStaticText("NO DATA")
 
     def _render_freeze(self, state: HudState, now: float) -> str:
         countdown = state.countdown_seconds
