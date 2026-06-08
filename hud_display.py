@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import copy
 import json
 import logging
+import math
 import os
 import threading
 import time
@@ -43,6 +45,14 @@ class HudDisplayClient:
         self._state = HudState(activity="menu")
         self._last_render = None
         self._lock = threading.Lock()
+
+        # CS2 GSI sometimes sends bomb time in larger jumps. The display uses the
+        # newest GSI value as a sync point and counts down locally every second
+        # between updates. That keeps the LED smooth: p40, p39, p38...
+        self._bomb_started_monotonic: float | None = None
+        self._bomb_initial_seconds: int | None = None
+        self._last_bomb_state = ""
+
         self._client = mqtt.Client(
             mqtt.CallbackAPIVersion.VERSION2,
             client_id=config.HUD_CLIENT_ID,
@@ -67,13 +77,56 @@ class HudDisplayClient:
 
     def _tick(self) -> None:
         with self._lock:
-            state = self._state
+            state = copy.copy(self._state)
+            bomb_seconds = self._current_bomb_seconds_locked()
+            if bomb_seconds is not None:
+                state.bomb_seconds = bomb_seconds
 
-        # Bomb time is intentionally not counted locally here.
-        # main.py publishes bomb_seconds from CS2 GSI phase_countdowns when available,
-        # so using state.bomb_seconds avoids drift between the game and LED display.
         rendered = self._renderer.render(state)
         self._publish_if_changed(rendered)
+
+    def _current_bomb_seconds_locked(self) -> int | None:
+        bomb_state = (self._state.bomb_state or "").lower()
+        if bomb_state not in {"planted", "plant"}:
+            return None
+        if self._bomb_started_monotonic is None or self._bomb_initial_seconds is None:
+            return self._state.bomb_seconds
+
+        elapsed = time.monotonic() - self._bomb_started_monotonic
+        # ceil keeps p40 visible for the first second, then p39, p38...
+        return max(0, int(math.ceil(self._bomb_initial_seconds - elapsed)))
+
+    def _sync_bomb_countdown_locked(self, new_state: HudState) -> None:
+        bomb_state = (new_state.bomb_state or "").lower()
+        incoming_seconds = new_state.bomb_seconds
+
+        if bomb_state not in {"planted", "plant"} or incoming_seconds is None:
+            self._bomb_started_monotonic = None
+            self._bomb_initial_seconds = None
+            self._last_bomb_state = bomb_state
+            return
+
+        now = time.monotonic()
+        should_start = (
+            self._bomb_started_monotonic is None
+            or self._bomb_initial_seconds is None
+            or self._last_bomb_state not in {"planted", "plant"}
+        )
+
+        if should_start:
+            self._bomb_started_monotonic = now
+            self._bomb_initial_seconds = incoming_seconds
+            self._last_bomb_state = bomb_state
+            return
+
+        predicted = self._current_bomb_seconds_locked()
+        if predicted is None or abs(predicted - incoming_seconds) > 1:
+            # Resync only when GSI disagrees noticeably. Small differences are
+            # ignored to avoid visible jitter on the LED.
+            self._bomb_started_monotonic = now
+            self._bomb_initial_seconds = incoming_seconds
+
+        self._last_bomb_state = bomb_state
 
     def _publish_if_changed(self, rendered: str) -> None:
         if rendered != self._last_render:
@@ -95,36 +148,39 @@ class HudDisplayClient:
             logger.warning("Invalid HUD state payload: %s", exc)
             return
 
+        new_state = HudState(
+            activity=str(payload.get("activity") or ""),
+            round_phase=str(payload.get("round_phase") or ""),
+            bomb_state=str(payload.get("bomb_state") or ""),
+            bomb_seconds=_to_int(payload.get("bomb_seconds")),
+            countdown_seconds=_to_int(payload.get("countdown_seconds")),
+            countdown_phase=str(payload.get("countdown_phase") or ""),
+            round_number=_to_int(payload.get("round")),
+            round_win_team=str(payload.get("round_win_team") or ""),
+            team=str(payload.get("team") or ""),
+            health=_to_int(payload.get("health")),
+            armor=_to_int(payload.get("armor")),
+            weapon=str(payload.get("weapon") or ""),
+            weapon_raw=str(payload.get("weapon_raw") or ""),
+            weapon_type=str(payload.get("weapon_type") or ""),
+            ammo=_to_int(payload.get("ammo")),
+            ammo_reserve=_to_int(payload.get("ammo_reserve")),
+            ammo_clip_max=_to_int(payload.get("ammo_clip_max")),
+            kills=_to_int(payload.get("kills")),
+            deaths=_to_int(payload.get("deaths")),
+            score=_to_int(payload.get("score")),
+            round_kills=_to_int(payload.get("round_kills")),
+            ct_score=_to_int(payload.get("ct_score")),
+            t_score=_to_int(payload.get("t_score")),
+            name=str(payload.get("name") or ""),
+            map=str(payload.get("map") or ""),
+            map_mode=str(payload.get("map_mode") or ""),
+            map_phase=str(payload.get("map_phase") or ""),
+        )
+
         with self._lock:
-            self._state = HudState(
-                activity=str(payload.get("activity") or ""),
-                round_phase=str(payload.get("round_phase") or ""),
-                bomb_state=str(payload.get("bomb_state") or ""),
-                bomb_seconds=_to_int(payload.get("bomb_seconds")),
-                countdown_seconds=_to_int(payload.get("countdown_seconds")),
-                countdown_phase=str(payload.get("countdown_phase") or ""),
-                round_number=_to_int(payload.get("round")),
-                round_win_team=str(payload.get("round_win_team") or ""),
-                team=str(payload.get("team") or ""),
-                health=_to_int(payload.get("health")),
-                armor=_to_int(payload.get("armor")),
-                weapon=str(payload.get("weapon") or ""),
-                weapon_raw=str(payload.get("weapon_raw") or ""),
-                weapon_type=str(payload.get("weapon_type") or ""),
-                ammo=_to_int(payload.get("ammo")),
-                ammo_reserve=_to_int(payload.get("ammo_reserve")),
-                ammo_clip_max=_to_int(payload.get("ammo_clip_max")),
-                kills=_to_int(payload.get("kills")),
-                deaths=_to_int(payload.get("deaths")),
-                score=_to_int(payload.get("score")),
-                round_kills=_to_int(payload.get("round_kills")),
-                ct_score=_to_int(payload.get("ct_score")),
-                t_score=_to_int(payload.get("t_score")),
-                name=str(payload.get("name") or ""),
-                map=str(payload.get("map") or ""),
-                map_mode=str(payload.get("map_mode") or ""),
-                map_phase=str(payload.get("map_phase") or ""),
-            )
+            self._state = new_state
+            self._sync_bomb_countdown_locked(new_state)
         logger.debug("HUD state update: %s", self._state)
 
 
