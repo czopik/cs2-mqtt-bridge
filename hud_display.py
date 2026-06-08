@@ -24,14 +24,9 @@ class Config:
     MQTT_PASSWORD = os.getenv("MQTT_PASSWORD", "")
     MQTT_KEEPALIVE = int(os.getenv("MQTT_KEEPALIVE", "60"))
     MQTT_TOPIC_STATE = os.getenv("MQTT_TOPIC_STATE", "cs2/state")
-    MQTT_TOPIC_STATUS = os.getenv("MQTT_TOPIC_STATUS", "cs2/status")
     MQTT_TOPIC_LED = os.getenv("MQTT_TOPIC_LED", "all")
     HUD_CLIENT_ID = os.getenv("HUD_CLIENT_ID", "cs2-led-hud")
     HUD_REFRESH_MS = int(os.getenv("HUD_REFRESH_MS", "100"))
-    # Default false: do not blank the matrix just because an old .env misses this setting.
-    # Fresh cs2/state should always drive the HUD.
-    HUD_CLEAR_ON_OFFLINE = os.getenv("HUD_CLEAR_ON_OFFLINE", "false").lower() == "true"
-    HUD_STALE_AFTER_SECONDS = int(os.getenv("HUD_STALE_AFTER_SECONDS", "60"))
 
 
 config = Config()
@@ -51,8 +46,6 @@ class HudDisplayClient:
         self._lock = threading.Lock()
         self._bomb_countdown_start: float | None = None
         self._initial_bomb_seconds: int | None = None
-        self._last_state_seen = 0.0
-        self._offline_requested = False
         self._client = mqtt.Client(
             mqtt.CallbackAPIVersion.VERSION2,
             client_id=config.HUD_CLIENT_ID,
@@ -78,17 +71,10 @@ class HudDisplayClient:
     def _tick(self) -> None:
         with self._lock:
             state = self._state
-            last_state_seen = self._last_state_seen
-            offline_requested = self._offline_requested
-
-        stale = last_state_seen <= 0 or (time.monotonic() - last_state_seen) > config.HUD_STALE_AFTER_SECONDS
-        if config.HUD_CLEAR_ON_OFFLINE and (offline_requested or stale):
-            self._publish_if_changed("")
-            return
 
         rendered_state = state
 
-        if state.bomb_state == "planted" and state.bomb_seconds is not None:
+        if state.bomb_state in {"planted", "plant"} and state.bomb_seconds is not None:
             if self._bomb_countdown_start is None:
                 self._bomb_countdown_start = time.time()
                 self._initial_bomb_seconds = state.bomb_seconds
@@ -109,31 +95,23 @@ class HudDisplayClient:
         if rendered != self._last_render:
             self._client.publish(config.MQTT_TOPIC_LED, rendered, qos=1, retain=False)
             self._last_render = rendered
-            logger.debug("HUD publish: %r", rendered)
+            logger.info("HUD publish: %r", rendered)
 
     def _on_connect(self, client: mqtt.Client, userdata: Any, flags: Any, reason_code: Any, properties: Any) -> None:
         if reason_code == 0:
             logger.info("HUD connected to MQTT %s:%s", config.MQTT_HOST, config.MQTT_PORT)
             client.subscribe(config.MQTT_TOPIC_STATE, qos=1)
-            client.subscribe(config.MQTT_TOPIC_STATUS, qos=1)
         else:
             logger.error("HUD MQTT connect failed. reason_code=%s", reason_code)
 
     def _on_message(self, client: mqtt.Client, userdata: Any, message: mqtt.MQTTMessage) -> None:
-        topic = message.topic
         try:
             payload = json.loads(message.payload.decode("utf-8"))
         except Exception as exc:
-            logger.warning("Invalid HUD payload on %s: %s", topic, exc)
-            return
-
-        if topic == config.MQTT_TOPIC_STATUS:
-            self._handle_status(payload)
+            logger.warning("Invalid HUD state payload: %s", exc)
             return
 
         with self._lock:
-            self._offline_requested = False
-            self._last_state_seen = time.monotonic()
             self._state = HudState(
                 activity=str(payload.get("activity") or ""),
                 round_phase=str(payload.get("round_phase") or ""),
@@ -161,21 +139,6 @@ class HudDisplayClient:
                 name=str(payload.get("name") or ""),
             )
         logger.debug("HUD state update: %s", self._state)
-
-    def _handle_status(self, payload: dict[str, Any]) -> None:
-        status = str(payload.get("status") or "").lower()
-        with self._lock:
-            # Only an explicit CS2 offline status is allowed to clear the HUD when HUD_CLEAR_ON_OFFLINE=true.
-            # Bridge-only statuses like "bridge_online" must not hide a valid cs2/state.
-            if status == "offline":
-                self._offline_requested = True
-                self._bomb_countdown_start = None
-                self._initial_bomb_seconds = None
-            elif status == "online":
-                self._offline_requested = False
-            elif status == "waiting_for_cs2" and self._last_state_seen <= 0:
-                self._offline_requested = True
-        logger.debug("HUD CS2 status: %s", status)
 
 
 def _to_int(value: Any) -> int | None:
