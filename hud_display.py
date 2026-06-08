@@ -137,6 +137,9 @@ class HudDisplayClient:
                 ct_score=_to_int(payload.get("ct_score")),
                 t_score=_to_int(payload.get("t_score")),
                 name=str(payload.get("name") or ""),
+                map=str(payload.get("map") or ""),
+                map_mode=str(payload.get("map_mode") or ""),
+                map_phase=str(payload.get("map_phase") or ""),
             )
         logger.debug("HUD state update: %s", self._state)
 
